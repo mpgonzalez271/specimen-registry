@@ -8,9 +8,9 @@
 
 import { neon } from "@neondatabase/serverless";
 
-const VERSION = "0.0.6-neon";
+const VERSION = "0.0.7-neon";
 const BUILD_DATE = "2026-07-26";
-const CITATION = "Specimen Registry v0.0.6 (2026). Maintained by Michael Gonzalez with AI assistance. https://specimenregistry.org. Data licensed under CC BY 4.0.";
+const CITATION = "Specimen Registry v0.0.7 (2026). Maintained by Michael Gonzalez with AI assistance. https://specimenregistry.org. Data licensed under CC BY 4.0.";
 const LICENSE_URL = "https://specimenregistry.org/license";
 const SOURCE_URL = "https://github.com/mpgonzalez271/specimen-registry";
 
@@ -105,6 +105,7 @@ function layout({ title, body, active }) {
     ["/analyses", "Analyses"],
     ["/comparisons", "Comparisons"],
     ["/stats", "Stats"],
+    ["/timeline", "Timeline"],
     ["/search?q=Denisovan", "Search"],
     ["/license", "License"],
   ].map(([href, label]) => {
@@ -475,6 +476,82 @@ async function routeAnalyses(sql, url) {
   return json({ version: VERSION, filter: spec ? { specimen_id: spec } : pub ? { publication_id: pub } : null, ...pageMeta(limit, offset, rows.length, total), analyses: rows });
 }
 
+function routeOpenAPI() {
+  const spec = {
+    openapi: "3.1.0",
+    info: {
+      title: "Specimen Registry (SAR) API",
+      version: VERSION,
+      description: "Public read-only registry of archaic hominin (and select ancient modern human) specimens, publications, sites, analyses, and cross-specimen comparisons. Every row carries a verification_state (draft | pending-verification | source-locked) and every material claim is source-quoted verbatim from primary literature. Data licensed under CC BY 4.0.",
+      license: { name: "CC BY 4.0", url: "https://creativecommons.org/licenses/by/4.0/legalcode" },
+      contact: { name: "Michael Gonzalez", url: "https://specimenregistry.org/license" },
+    },
+    servers: [{ url: "https://specimenregistry.org" }],
+    paths: {
+      "/health": { get: { summary: "Liveness probe", responses: { "200": { description: "ok" } } } },
+      "/version": { get: { summary: "Service version and capability set", responses: { "200": { description: "version JSON" } } } },
+      "/license": { get: { summary: "CC BY 4.0 attribution disclosure", responses: { "200": { description: "license JSON or HTML" } } } },
+      "/stats": { get: { summary: "Corpus rollups: totals + specimens by state/site + pubs by year", responses: { "200": { description: "stats JSON" } } } },
+      "/timeline": { get: { summary: "Specimens with their earliest describing publication, ordered by publication year", responses: { "200": { description: "timeline JSON" } } } },
+      "/audit": { get: { summary: "Recent access log entries (last N=20 default, max 100). Only public routes; IPs are one-way hashed.", parameters: [{ name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 20 } }], responses: { "200": { description: "audit JSON" } } } },
+      "/publications": { get: { summary: "List publications (paginated)", parameters: [{ name: "limit", in: "query", schema: { type: "integer", default: 25, maximum: 100 } }, { name: "offset", in: "query", schema: { type: "integer", default: 0 } }], responses: { "200": { description: "publications JSON" } } } },
+      "/publications/{doi}": { get: { summary: "Single publication by DOI", parameters: [{ name: "doi", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "publication JSON or HTML" } } } },
+      "/specimens": { get: { summary: "List specimens (paginated)", parameters: [{ name: "limit", in: "query", schema: { type: "integer", default: 25, maximum: 100 } }, { name: "offset", in: "query", schema: { type: "integer", default: 0 } }, { name: "site_id", in: "query", schema: { type: "string" } }], responses: { "200": { description: "specimens JSON" } } } },
+      "/specimens/{id}": { get: { summary: "Single specimen by ID", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "specimen JSON or HTML" } } } },
+      "/sites": { get: { summary: "List sites", responses: { "200": { description: "sites JSON" } } } },
+      "/sites/{id}": { get: { summary: "Single site by ID", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "site JSON or HTML" } } } },
+      "/analyses": { get: { summary: "List analyses (filter by specimen_id or publication_id)", parameters: [{ name: "specimen_id", in: "query", schema: { type: "string" } }, { name: "publication_id", in: "query", schema: { type: "string" } }], responses: { "200": { description: "analyses JSON" } } } },
+      "/comparisons": { get: { summary: "List cross-specimen comparison rows", parameters: [{ name: "specimen_id", in: "query", schema: { type: "string" } }, { name: "publication_id", in: "query", schema: { type: "string" } }, { name: "type", in: "query", schema: { type: "string", enum: ["genome-relatedness", "sister-lineage", "introgression-source", "related-population", "kin-relationship", "contemporaneous"] } }], responses: { "200": { description: "comparisons JSON or HTML" } } } },
+      "/graph/{specimen_id}": { get: { summary: "Provenance chain: specimen → papers → site → related specimens", parameters: [{ name: "specimen_id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "nodes + edges JSON" } } } },
+      "/search": { get: { summary: "Full-text search over publications + specimens", parameters: [{ name: "q", in: "query", schema: { type: "string" } }, { name: "type", in: "query", schema: { type: "string", enum: ["publication", "specimen", "all"] } }], responses: { "200": { description: "search JSON or HTML" } } } },
+    },
+    components: {
+      schemas: {
+        VerificationState: { type: "string", enum: ["draft", "pending-verification", "source-locked"], description: "Human-review state on a row. Only source-locked rows are safe to cite; draft/pending-verification await Michael Gonzalez's primary-source sign-off." },
+      },
+    },
+  };
+  return json(spec);
+}
+
+async function routeTimeline(sql) {
+  const rows = await sql`
+    SELECT sp.id AS specimen_id, sp.common_name, sp.taxonomic_assignment, sp.site_id,
+           s.name AS site_name,
+           MIN(p.year) AS earliest_year,
+           ARRAY_AGG(DISTINCT p.id ORDER BY p.id) AS publication_ids
+    FROM specimens sp
+    LEFT JOIN sites s ON s.id = sp.site_id
+    LEFT JOIN analyses a ON a.specimen_id = sp.id
+    LEFT JOIN publications p ON p.id = a.publication_id
+    GROUP BY sp.id, sp.common_name, sp.taxonomic_assignment, sp.site_id, s.name
+    ORDER BY MIN(p.year) NULLS LAST, sp.id
+  `;
+  return json({
+    version: VERSION,
+    count: rows.length,
+    timeline: rows,
+    note: "earliest_year = MIN(publication.year) of any analysis linking to the specimen. Specimens with no analysis link are ordered last (year=null).",
+  });
+}
+
+async function routeAudit(sql, url) {
+  const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || 20), 1), 100);
+  const rows = await sql`
+    SELECT ts, method, path, status, duration_ms, ip_hash, ua AS user_agent, ray_id
+    FROM access_log
+    ORDER BY ts DESC
+    LIMIT ${limit}
+  `;
+  return json({
+    version: VERSION,
+    count: rows.length,
+    limit,
+    audit: rows,
+    note: "IPs are one-way hashed with a rotating salt; no reverse lookup possible. User-Agent may be null for programmatic clients. This endpoint itself is included in the log.",
+  });
+}
+
 async function routeStats(sql) {
   const [pubs] = await sql`SELECT COUNT(*)::int AS c FROM publications`;
   const [specs] = await sql`SELECT COUNT(*)::int AS c FROM specimens`;
@@ -802,13 +879,13 @@ export default {
         build_date: BUILD_DATE,
         stage: "pilot-corpus",
         backing_store: "neon-postgres",
-        capabilities: ["pagination", "fts-search", "html-browser", "comparisons", "provenance-graph", "license", "rate-limit", "access-log", "stats"],
+        capabilities: ["pagination", "fts-search", "html-browser", "comparisons", "provenance-graph", "license", "rate-limit", "access-log", "stats", "timeline", "audit", "openapi"],
       }, { rate_remaining: rate.remaining });
     }
     if (path === "/license") return routeLicense(acceptsHtml);
     if (path === "/robots.txt") return text("User-agent: *\nAllow: /\nSitemap: https://specimenregistry.org/sitemap.txt\n");
     if (path === "/sitemap.txt") {
-      const paths = ["/", "/publications", "/specimens", "/sites", "/analyses", "/comparisons", "/search", "/license", "/version", "/stats"];
+      const paths = ["/", "/publications", "/specimens", "/sites", "/analyses", "/comparisons", "/search", "/license", "/version", "/stats", "/timeline", "/audit", "/openapi.json"];
       return text(paths.map((p) => `https://specimenregistry.org${p}`).join("\n") + "\n");
     }
 
@@ -826,6 +903,9 @@ export default {
       else if (path === "/analyses") response = await routeAnalyses(sql, url);
       else if (path === "/comparisons") response = await routeComparisons(sql, url, acceptsHtml);
       else if (path === "/stats") response = await routeStats(sql);
+      else if (path === "/timeline") response = await routeTimeline(sql);
+      else if (path === "/audit") response = await routeAudit(sql, url);
+      else if (path === "/openapi.json") response = routeOpenAPI();
       else {
         const specM = path.match(/^\/specimens\/([^/]+)$/);
         const siteM = path.match(/^\/sites\/([^/]+)$/);
