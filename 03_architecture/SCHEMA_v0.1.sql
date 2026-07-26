@@ -146,13 +146,18 @@ CREATE INDEX IF NOT EXISTS sah_specimen_current_idx
 -- Add `publications.study_type` enum. Three initial values based
 -- on the pilot; more will emerge.
 
-CREATE TYPE IF NOT EXISTS study_type AS ENUM (
-    'specimen',       -- introduces one or more specimens (most papers)
-    'method',         -- method development or application to sediment/comparison material
-    'chronology',     -- dates a site/layer without introducing specimens (T1.8)
-    'context',        -- geoarchaeology, occupation history (partial overlap with chronology)
-    'review'          -- synthesis of prior work
-);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'study_type') THEN
+        CREATE TYPE study_type AS ENUM (
+            'specimen',    -- introduces one or more specimens (most papers)
+            'method',      -- method development or application to sediment/comparison material
+            'chronology',  -- dates a site/layer without introducing specimens (T1.8)
+            'context',     -- geoarchaeology, occupation history (partial overlap with chronology)
+            'review'       -- synthesis of prior work
+        );
+    END IF;
+END$$;
 
 -- Migration note: existing rows in `publications` need to be
 -- classified. Best done by human review pass over the 12 pilot
@@ -229,7 +234,7 @@ ALTER TABLE analyses
 
 CREATE TABLE IF NOT EXISTS analysis_comparison_specimens (
     id                    bigserial PRIMARY KEY,
-    analysis_id           text NOT NULL REFERENCES analyses(id),
+    analysis_id           uuid NOT NULL REFERENCES analyses(id),
     comparison_specimen_id text NOT NULL REFERENCES specimens(id),
     role                  text NOT NULL DEFAULT 'comparison', -- 'reference' | 'comparison' | 'outgroup'
     source_quote          text,                 -- how the paper describes the use
