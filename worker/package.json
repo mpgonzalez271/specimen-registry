@@ -1,10 +1,16 @@
 {
   "name": "sar-worker",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "private": true,
   "type": "module",
   "main": "index.js",
+  "scripts": {
+    "bundle": "esbuild index.js --bundle --format=esm --target=es2022 --platform=neutral --outfile=dist/index.js"
+  },
   "dependencies": {
     "@neondatabase/serverless": "^0.9.5"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
   }
 }

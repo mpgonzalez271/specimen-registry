@@ -1,10 +1,10 @@
-// SAR v0.0.3 — Neon-backed specimen registry Worker
-// Uses the Neon HTTP driver bundled inline (no npm install required).
-// Reads DATABASE_URL from wrangler secret.
+// SAR v0.0.4 — Neon-backed specimen registry Worker
+// Adds pagination (limit/offset), /search full-text route, and small robustness fixes.
+// Reads DATABASE_URL from wrangler binding (inherit secret).
 
 import { neon } from "@neondatabase/serverless";
 
-const VERSION = "0.0.3-neon";
+const VERSION = "0.0.4-neon";
 const BUILD_DATE = "2026-07-26";
 
 const CORS = {
@@ -12,6 +12,9 @@ const CORS = {
   "Access-Control-Allow-Methods": "GET, OPTIONS",
   "Access-Control-Allow-Headers": "content-type",
 };
+
+const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 200;
 
 function json(body, init = {}) {
   return new Response(JSON.stringify(body, null, 2), {
@@ -34,6 +37,27 @@ function html(body, init = {}) {
   });
 }
 
+function parsePaging(url) {
+  const rawLimit = parseInt(url.searchParams.get("limit") ?? "", 10);
+  const rawOffset = parseInt(url.searchParams.get("offset") ?? "", 10);
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0
+    ? Math.min(rawLimit, MAX_LIMIT)
+    : DEFAULT_LIMIT;
+  const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
+  return { limit, offset };
+}
+
+function pageMeta(limit, offset, count, total) {
+  const nextOffset = offset + count;
+  return {
+    limit,
+    offset,
+    count,
+    total,
+    next_offset: nextOffset < total ? nextOffset : null,
+  };
+}
+
 // ---------- Homepage --------------------------------------------------
 
 async function renderHomepage(sql) {
@@ -51,82 +75,62 @@ async function renderHomepage(sql) {
 
   const rows = pubs
     .map(
-      (p) => `<tr>
-        <td><a href="/publications/${encodeURIComponent(p.id)}">${p.id}</a></td>
-        <td>${p.year ?? ""}</td>
-        <td>${escapeHtml(p.title ?? "")}</td>
-        <td>${escapeHtml(p.journal ?? "")}</td>
-        <td style="text-align:right">${p.specimen_count}</td>
-      </tr>`
+      (p) => `
+    <tr>
+      <td><a href="/publications/${encodeURIComponent(p.id)}"><code>${p.id}</code></a></td>
+      <td>${escapeHtml(p.title ?? "")}</td>
+      <td>${p.year ?? ""}</td>
+      <td>${escapeHtml(p.journal ?? "")}</td>
+      <td style="text-align:right">${p.specimen_count ?? 0}</td>
+    </tr>`
     )
-    .join("\n");
+    .join("");
 
   return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Specimen Registry — SAR v${VERSION}</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <style>
-    :root { color-scheme: light dark; }
-    body { font: 15px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
-    h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
-    .muted { color: #666; font-size: .9em; }
-    .stats { display: flex; gap: 2rem; margin: 1.5rem 0; padding: .75rem 1rem; background: #f4f4f4; border-radius: 6px; }
-    .stat { font-weight: 600; }
-    table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
-    th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #ddd; font-size: 14px; vertical-align: top; }
-    th { background: #fafafa; }
-    a { color: #0645ad; text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    @media (prefers-color-scheme: dark) {
-      body { background: #111; color: #eee; }
-      .stats { background: #1e1e1e; }
-      th { background: #1a1a1a; }
-      th, td { border-bottom-color: #333; }
-      a { color: #6bb0f5; }
-    }
-  </style>
-</head>
-<body>
-  <h1>Specimen Registry — Denisova pilot corpus</h1>
-  <p class="muted">SAR v${VERSION}. Backing store: Neon Postgres. All rows in <code>verification_state='draft'</code>.</p>
-  <div class="stats">
-    <span class="stat">${pubs.length} publications</span>
-    <span class="stat">${specimenCount} specimens</span>
-    <span class="stat">${analysisCount} analyses</span>
-    <span class="stat">${siteCount} sites</span>
-  </div>
-  <table>
-    <thead><tr><th>DOI</th><th>Year</th><th>Title</th><th>Journal</th><th>Specimens</th></tr></thead>
-    <tbody>
-      ${rows}
-    </tbody>
-  </table>
-  <p class="muted" style="margin-top: 2rem;">
-    API endpoints:
-    <a href="/corpus">/corpus</a> ·
-    <a href="/specimens">/specimens</a> ·
-    <a href="/sites">/sites</a> ·
-    <a href="/publications">/publications</a> ·
-    <a href="/analyses">/analyses</a> ·
-    <a href="/health">/health</a> ·
-    <a href="/version">/version</a>
-  </p>
-</body>
-</html>`;
+<html><head><meta charset="utf-8"/>
+<title>Specimen Registry</title>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #111; }
+h1 { margin-bottom: 0.2rem; } .muted { color: #666; }
+table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+th, td { border-bottom: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+code { background: #f4f4f4; padding: 0 0.25rem; border-radius: 3px; }
+.pill { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; background: #eef; color: #224; font-size: 0.85rem; }
+</style></head><body>
+<h1>Specimen Registry v0</h1>
+<p class="muted">Neon-backed public read API. Pilot corpus: Denisova Cave and related sites.</p>
+<p>
+  <span class="pill">${pubs.length} publications</span>
+  <span class="pill">${specimenCount} specimens</span>
+  <span class="pill">${analysisCount} analyses</span>
+  <span class="pill">${siteCount} sites</span>
+</p>
+<p>
+  API index:
+  <a href="/corpus">/corpus</a> ·
+  <a href="/publications">/publications</a> ·
+  <a href="/specimens">/specimens</a> ·
+  <a href="/sites">/sites</a> ·
+  <a href="/analyses">/analyses</a> ·
+  <a href="/search?q=Denisovan">/search?q=</a> ·
+  <a href="/version">/version</a>
+</p>
+<table>
+<thead><tr><th>ID (DOI)</th><th>Title</th><th>Year</th><th>Journal</th><th style="text-align:right">Specimens</th></tr></thead>
+<tbody>${rows}</tbody></table>
+<p class="muted" style="margin-top:2rem;font-size:0.85rem">
+  v${VERSION} · built ${BUILD_DATE} · <a href="https://github.com/mpgonzalez271/specimen-registry">source</a>
+</p>
+</body></html>`;
 }
 
 function escapeHtml(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
-  );
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-// ---------- Routes ---------------------------------------------------
+// ---------- Routes ----------------------------------------------------
 
 async function routeCorpus(sql) {
-  // Same shape as v0.0.2 for backward compat, but data comes from Neon.
   const pubs = await sql`
     SELECT id, title, year, journal, authors, verification_state
     FROM publications ORDER BY year DESC, id
@@ -149,23 +153,30 @@ async function routeCorpus(sql) {
 
 async function routeSpecimens(sql, url) {
   const site_id = url.searchParams.get("site_id");
+  const { limit, offset } = parsePaging(url);
+
+  const total = site_id
+    ? (await sql`SELECT COUNT(*)::int AS n FROM specimens WHERE site_id = ${site_id}`)[0].n
+    : (await sql`SELECT COUNT(*)::int AS n FROM specimens`)[0].n;
+
   const rows = site_id
     ? await sql`
         SELECT s.id, s.site_id, s.common_name, s.taxonomic_assignment, s.assignment_method,
                s.assignment_publication, s.verification_state,
                (SELECT COUNT(*)::int FROM analyses a WHERE a.specimen_id = s.id) AS analysis_count
-        FROM specimens s WHERE s.site_id = ${site_id} ORDER BY s.id
+        FROM specimens s WHERE s.site_id = ${site_id}
+        ORDER BY s.id LIMIT ${limit} OFFSET ${offset}
       `
     : await sql`
         SELECT s.id, s.site_id, s.common_name, s.taxonomic_assignment, s.assignment_method,
                s.assignment_publication, s.verification_state,
                (SELECT COUNT(*)::int FROM analyses a WHERE a.specimen_id = s.id) AS analysis_count
-        FROM specimens s ORDER BY s.id
+        FROM specimens s ORDER BY s.id LIMIT ${limit} OFFSET ${offset}
       `;
   return json({
     version: VERSION,
     filter: site_id ? { site_id } : null,
-    count: rows.length,
+    ...pageMeta(limit, offset, rows.length, total),
     specimens: rows,
   });
 }
@@ -174,7 +185,6 @@ async function routeSpecimenById(sql, id) {
   const rows = await sql`SELECT * FROM specimens WHERE id = ${id}`;
   if (rows.length === 0) return json({ error: "not_found", id }, { status: 404 });
   const spec = rows[0];
-  // Strip the raw markdown blob from verification_notes to keep the payload readable
   if (spec.verification_notes && spec.verification_notes.includes("---RAW MARKDOWN---")) {
     spec.verification_notes = spec.verification_notes.split("---RAW MARKDOWN---")[0].trim();
   }
@@ -187,13 +197,19 @@ async function routeSpecimenById(sql, id) {
   return json({ version: VERSION, specimen: spec, site, analyses });
 }
 
-async function routeSites(sql) {
+async function routeSites(sql, url) {
+  const { limit, offset } = parsePaging(url);
+  const total = (await sql`SELECT COUNT(*)::int AS n FROM sites`)[0].n;
   const rows = await sql`
     SELECT s.*,
            (SELECT COUNT(*)::int FROM specimens sp WHERE sp.site_id = s.id) AS specimen_count
-    FROM sites s ORDER BY s.id
+    FROM sites s ORDER BY s.id LIMIT ${limit} OFFSET ${offset}
   `;
-  return json({ version: VERSION, count: rows.length, sites: rows });
+  return json({
+    version: VERSION,
+    ...pageMeta(limit, offset, rows.length, total),
+    sites: rows,
+  });
 }
 
 async function routeSiteById(sql, id) {
@@ -206,15 +222,21 @@ async function routeSiteById(sql, id) {
   return json({ version: VERSION, site: rows[0], specimens });
 }
 
-async function routePublications(sql) {
+async function routePublications(sql, url) {
+  const { limit, offset } = parsePaging(url);
+  const total = (await sql`SELECT COUNT(*)::int AS n FROM publications`)[0].n;
   const rows = await sql`
     SELECT id, title, year, journal, authors, verification_state,
            (SELECT COUNT(*)::int FROM analyses a WHERE a.publication_id = p.id) AS analysis_count,
            (SELECT COUNT(*)::int FROM specimens s
               WHERE s.assignment_publication = p.id OR s.provenance_publication = p.id) AS specimen_count
-    FROM publications p ORDER BY year DESC, id
+    FROM publications p ORDER BY year DESC, id LIMIT ${limit} OFFSET ${offset}
   `;
-  return json({ version: VERSION, count: rows.length, publications: rows });
+  return json({
+    version: VERSION,
+    ...pageMeta(limit, offset, rows.length, total),
+    publications: rows,
+  });
 }
 
 async function routePublicationById(sql, id) {
@@ -240,15 +262,100 @@ async function routePublicationById(sql, id) {
 async function routeAnalyses(sql, url) {
   const spec = url.searchParams.get("specimen_id");
   const pub = url.searchParams.get("publication_id");
+  const { limit, offset } = parsePaging(url);
+
   let rows;
+  let total;
   if (spec) {
-    rows = await sql`SELECT * FROM analyses WHERE specimen_id = ${spec} ORDER BY publication_id, method`;
+    total = (await sql`SELECT COUNT(*)::int AS n FROM analyses WHERE specimen_id = ${spec}`)[0].n;
+    rows = await sql`
+      SELECT * FROM analyses WHERE specimen_id = ${spec}
+      ORDER BY publication_id, method LIMIT ${limit} OFFSET ${offset}
+    `;
   } else if (pub) {
-    rows = await sql`SELECT * FROM analyses WHERE publication_id = ${pub} ORDER BY specimen_id, method`;
+    total = (await sql`SELECT COUNT(*)::int AS n FROM analyses WHERE publication_id = ${pub}`)[0].n;
+    rows = await sql`
+      SELECT * FROM analyses WHERE publication_id = ${pub}
+      ORDER BY specimen_id, method LIMIT ${limit} OFFSET ${offset}
+    `;
   } else {
-    rows = await sql`SELECT * FROM analyses ORDER BY specimen_id, publication_id, method`;
+    total = (await sql`SELECT COUNT(*)::int AS n FROM analyses`)[0].n;
+    rows = await sql`
+      SELECT * FROM analyses
+      ORDER BY specimen_id, publication_id, method LIMIT ${limit} OFFSET ${offset}
+    `;
   }
-  return json({ version: VERSION, count: rows.length, analyses: rows });
+  return json({
+    version: VERSION,
+    filter: spec ? { specimen_id: spec } : pub ? { publication_id: pub } : null,
+    ...pageMeta(limit, offset, rows.length, total),
+    analyses: rows,
+  });
+}
+
+async function routeSearch(sql, url) {
+  const q = (url.searchParams.get("q") ?? "").trim();
+  const type = (url.searchParams.get("type") ?? "").trim().toLowerCase();
+  const { limit, offset } = parsePaging(url);
+
+  if (!q) {
+    return json({
+      error: "missing_query",
+      message: "?q= is required. Optional: ?type=publication|specimen&limit=&offset=",
+    }, { status: 400 });
+  }
+  if (type && type !== "publication" && type !== "specimen") {
+    return json({
+      error: "invalid_type",
+      message: "type must be 'publication' or 'specimen' (or omitted for both)",
+    }, { status: 400 });
+  }
+
+  const results = { query: q, type: type || "both", limit, offset };
+
+  if (type === "" || type === "publication") {
+    const total = (await sql`
+      SELECT COUNT(*)::int AS n FROM publications
+      WHERE fts_tsv @@ plainto_tsquery('english', ${q})
+    `)[0].n;
+    const rows = await sql`
+      SELECT id, title, year, journal,
+             ts_rank(fts_tsv, plainto_tsquery('english', ${q})) AS rank
+      FROM publications
+      WHERE fts_tsv @@ plainto_tsquery('english', ${q})
+      ORDER BY rank DESC, year DESC
+      LIMIT ${limit} OFFSET ${offset}
+    `;
+    results.publications = {
+      total,
+      count: rows.length,
+      next_offset: offset + rows.length < total ? offset + rows.length : null,
+      hits: rows,
+    };
+  }
+
+  if (type === "" || type === "specimen") {
+    const total = (await sql`
+      SELECT COUNT(*)::int AS n FROM specimens
+      WHERE fts_tsv @@ plainto_tsquery('english', ${q})
+    `)[0].n;
+    const rows = await sql`
+      SELECT id, common_name, taxonomic_assignment, assignment_method, verification_state,
+             ts_rank(fts_tsv, plainto_tsquery('english', ${q})) AS rank
+      FROM specimens
+      WHERE fts_tsv @@ plainto_tsquery('english', ${q})
+      ORDER BY rank DESC, id
+      LIMIT ${limit} OFFSET ${offset}
+    `;
+    results.specimens = {
+      total,
+      count: rows.length,
+      next_offset: offset + rows.length < total ? offset + rows.length : null,
+      hits: rows,
+    };
+  }
+
+  return json({ version: VERSION, ...results });
 }
 
 // ---------- Entry ----------------------------------------------------
@@ -260,7 +367,6 @@ export default {
 
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
-    // Static routes
     if (path === "/health") return json({ status: "ok", ts: new Date().toISOString() });
     if (path === "/version") {
       return json({
@@ -269,10 +375,10 @@ export default {
         build_date: BUILD_DATE,
         stage: "pilot-corpus",
         backing_store: "neon-postgres",
+        capabilities: ["pagination", "fts-search"],
       });
     }
 
-    // DB-backed routes
     if (!env.DATABASE_URL) {
       return json({ error: "DATABASE_URL not configured" }, { status: 500 });
     }
@@ -281,22 +387,22 @@ export default {
     try {
       if (path === "/") return html(await renderHomepage(sql));
       if (path === "/corpus") return await routeCorpus(sql);
+      if (path === "/search") return await routeSearch(sql, url);
 
       if (path === "/specimens") return await routeSpecimens(sql, url);
       const specM = path.match(/^\/specimens\/([^/]+)$/);
       if (specM) return await routeSpecimenById(sql, decodeURIComponent(specM[1]));
 
-      if (path === "/sites") return await routeSites(sql);
+      if (path === "/sites") return await routeSites(sql, url);
       const siteM = path.match(/^\/sites\/([^/]+)$/);
       if (siteM) return await routeSiteById(sql, decodeURIComponent(siteM[1]));
 
-      if (path === "/publications") return await routePublications(sql);
+      if (path === "/publications") return await routePublications(sql, url);
       const pubM = path.match(/^\/publications\/([^/]+)$/);
       if (pubM) return await routePublicationById(sql, decodeURIComponent(pubM[1]));
 
       if (path === "/analyses") return await routeAnalyses(sql, url);
 
-      // Legacy /corpus/:id (from v0.0.2) → redirect to /publications/:id
       const legacy = path.match(/^\/corpus\/([^/]+)$/);
       if (legacy) return await routePublicationById(sql, decodeURIComponent(legacy[1]));
 

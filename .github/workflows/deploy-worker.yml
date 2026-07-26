@@ -1,0 +1,92 @@
+name: Deploy Worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "worker/**"
+      - ".github/workflows/deploy-worker.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: worker-deploy
+  cancel-in-progress: false
+
+env:
+  CLOUDFLARE_ACCOUNT_ID: dd63b051b79cc09c7faa9232d1be3003
+  WORKER_NAME: sar-v0
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: worker/package.json
+
+      - name: Install worker deps
+        working-directory: worker
+        run: npm install --no-save @neondatabase/serverless esbuild
+
+      - name: Bundle worker
+        working-directory: worker
+        run: |
+          mkdir -p dist
+          npx esbuild index.js \
+            --bundle \
+            --format=esm \
+            --target=es2022 \
+            --platform=neutral \
+            --outfile=dist/index.js
+          ls -la dist/
+          wc -l dist/index.js
+
+      - name: Upload worker to Cloudflare
+        working-directory: worker
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          cat > /tmp/wm.json <<'EOF'
+          {
+            "main_module": "index.js",
+            "compatibility_date": "2024-11-06",
+            "compatibility_flags": ["nodejs_compat"],
+            "bindings": [
+              { "name": "DATABASE_URL", "type": "inherit" }
+            ]
+          }
+          EOF
+
+          response=$(curl -sS -X PUT \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${WORKER_NAME}" \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            -F "metadata=@/tmp/wm.json;type=application/json" \
+            -F "index.js=@dist/index.js;type=application/javascript+module")
+
+          echo "$response" | jq '.'
+          success=$(echo "$response" | jq -r '.success')
+          if [ "$success" != "true" ]; then
+            echo "::error::Worker upload failed"
+            exit 1
+          fi
+          echo "::notice::Worker deployed"
+
+      - name: Smoke test
+        run: |
+          sleep 5
+          version=$(curl -sS "https://specimenregistry.org/version")
+          echo "$version" | jq '.'
+          # Confirm site returns a version string
+          echo "$version" | jq -e '.version' > /dev/null || (echo "::error::/version smoke test failed" && exit 1)
+          # Confirm /corpus returns a count
+          count=$(curl -sS "https://specimenregistry.org/corpus" | jq '.count')
+          echo "corpus count: $count"
+          [ "$count" -gt 0 ] || (echo "::error::/corpus smoke test failed" && exit 1)
+          echo "::notice::Smoke tests passed"
