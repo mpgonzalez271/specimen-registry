@@ -885,7 +885,7 @@ export default {
     if (path === "/license") return routeLicense(acceptsHtml);
     if (path === "/robots.txt") return text("User-agent: *\nAllow: /\nSitemap: https://specimenregistry.org/sitemap.txt\n");
     if (path === "/sitemap.txt") {
-      const paths = ["/", "/publications", "/specimens", "/sites", "/analyses", "/comparisons", "/search", "/license", "/version", "/stats", "/timeline", "/audit", "/openapi.json"];
+      const paths = ["/", "/publications", "/specimens", "/sites", "/analyses", "/comparisons", "/search", "/license", "/version", "/stats", "/timeline", "/audit", "/openapi"];
       return text(paths.map((p) => `https://specimenregistry.org${p}`).join("\n") + "\n");
     }
 
@@ -905,7 +905,7 @@ export default {
       else if (path === "/stats") response = await routeStats(sql);
       else if (path === "/timeline") response = await routeTimeline(sql);
       else if (path === "/audit") response = await routeAudit(sql, url);
-      else if (path === "/openapi.json") response = routeOpenAPI();
+      else if (path === "/openapi" || path === "/openapi.json") response = routeOpenAPI();
       else {
         const specM = path.match(/^\/specimens\/([^/]+)$/);
         const siteM = path.match(/^\/sites\/([^/]+)$/);
