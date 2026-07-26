@@ -8,9 +8,9 @@
 
 import { neon } from "@neondatabase/serverless";
 
-const VERSION = "0.0.5-neon";
+const VERSION = "0.0.6-neon";
 const BUILD_DATE = "2026-07-26";
-const CITATION = "Specimen Registry v0.0.5 (2026). Maintained by Michael Gonzalez with AI assistance. https://specimenregistry.org. Data licensed under CC BY 4.0.";
+const CITATION = "Specimen Registry v0.0.6 (2026). Maintained by Michael Gonzalez with AI assistance. https://specimenregistry.org. Data licensed under CC BY 4.0.";
 const LICENSE_URL = "https://specimenregistry.org/license";
 const SOURCE_URL = "https://github.com/mpgonzalez271/specimen-registry";
 
@@ -104,6 +104,7 @@ function layout({ title, body, active }) {
     ["/sites", "Sites"],
     ["/analyses", "Analyses"],
     ["/comparisons", "Comparisons"],
+    ["/stats", "Stats"],
     ["/search?q=Denisovan", "Search"],
     ["/license", "License"],
   ].map(([href, label]) => {
@@ -474,6 +475,47 @@ async function routeAnalyses(sql, url) {
   return json({ version: VERSION, filter: spec ? { specimen_id: spec } : pub ? { publication_id: pub } : null, ...pageMeta(limit, offset, rows.length, total), analyses: rows });
 }
 
+async function routeStats(sql) {
+  const [pubs] = await sql`SELECT COUNT(*)::int AS c FROM publications`;
+  const [specs] = await sql`SELECT COUNT(*)::int AS c FROM specimens`;
+  const [sites] = await sql`SELECT COUNT(*)::int AS c FROM sites`;
+  const [anals] = await sql`SELECT COUNT(*)::int AS c FROM analyses`;
+  const [comps] = await sql`SELECT COUNT(*)::int AS c FROM specimen_comparisons`;
+  const byState = await sql`
+    SELECT verification_state, COUNT(*)::int AS c
+    FROM specimens
+    GROUP BY verification_state
+    ORDER BY verification_state
+  `;
+  const bySite = await sql`
+    SELECT s.id AS site_id, s.name AS site_name, COUNT(sp.id)::int AS specimen_count
+    FROM sites s
+    LEFT JOIN specimens sp ON sp.site_id = s.id
+    GROUP BY s.id, s.name
+    ORDER BY specimen_count DESC, s.id
+  `;
+  const byYear = await sql`
+    SELECT year, COUNT(*)::int AS c
+    FROM publications
+    WHERE year IS NOT NULL
+    GROUP BY year
+    ORDER BY year
+  `;
+  return json({
+    totals: {
+      publications: pubs.c,
+      specimens: specs.c,
+      sites: sites.c,
+      analyses: anals.c,
+      comparisons: comps.c,
+    },
+    specimens_by_verification_state: byState,
+    specimens_by_site: bySite,
+    publications_by_year: byYear,
+    note: "All specimens in this pilot are in `draft` or `pending-verification` state until Michael Gonzalez signs off on primary-source review.",
+  });
+}
+
 async function routeComparisons(sql, url, wantsHtml) {
   const specA = url.searchParams.get("specimen_id");
   const pub = url.searchParams.get("publication_id");
@@ -760,13 +802,13 @@ export default {
         build_date: BUILD_DATE,
         stage: "pilot-corpus",
         backing_store: "neon-postgres",
-        capabilities: ["pagination", "fts-search", "html-browser", "comparisons", "provenance-graph", "license", "rate-limit", "access-log"],
+        capabilities: ["pagination", "fts-search", "html-browser", "comparisons", "provenance-graph", "license", "rate-limit", "access-log", "stats"],
       }, { rate_remaining: rate.remaining });
     }
     if (path === "/license") return routeLicense(acceptsHtml);
     if (path === "/robots.txt") return text("User-agent: *\nAllow: /\nSitemap: https://specimenregistry.org/sitemap.txt\n");
     if (path === "/sitemap.txt") {
-      const paths = ["/", "/publications", "/specimens", "/sites", "/analyses", "/comparisons", "/search", "/license", "/version"];
+      const paths = ["/", "/publications", "/specimens", "/sites", "/analyses", "/comparisons", "/search", "/license", "/version", "/stats"];
       return text(paths.map((p) => `https://specimenregistry.org${p}`).join("\n") + "\n");
     }
 
@@ -783,6 +825,7 @@ export default {
       else if (path === "/publications") response = await routePublications(sql, url);
       else if (path === "/analyses") response = await routeAnalyses(sql, url);
       else if (path === "/comparisons") response = await routeComparisons(sql, url, acceptsHtml);
+      else if (path === "/stats") response = await routeStats(sql);
       else {
         const specM = path.match(/^\/specimens\/([^/]+)$/);
         const siteM = path.match(/^\/sites\/([^/]+)$/);
