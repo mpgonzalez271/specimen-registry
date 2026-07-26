@@ -1,0 +1,30 @@
+name: ingest-lint
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "corpus/**/*.md"
+      - "tools/ingest_lint.py"
+      - ".github/workflows/lint.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "corpus/**/*.md"
+      - "tools/ingest_lint.py"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run ingest linter
+        run: |
+          python3 tools/ingest_lint.py
