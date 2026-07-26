@@ -249,9 +249,22 @@ def lint_file(path: Path) -> FileReport:
 
 
 def find_ingest_files(root: Path) -> Iterable[Path]:
+    """Return all T*.md ingest files under `root`, recursively.
+
+    Skips: node_modules, .git, dist, hidden dirs.
+    """
     if not root.exists():
         return []
-    return sorted(p for p in root.iterdir() if p.is_file() and p.suffix == ".md" and p.name.startswith("T"))
+    if root.is_file():
+        return [root] if root.suffix == ".md" and root.name.startswith("T") else []
+    results: list[Path] = []
+    SKIP = {"node_modules", ".git", "dist", "__pycache__"}
+    for p in root.rglob("T*.md"):
+        if any(part in SKIP or part.startswith(".") for part in p.parts):
+            continue
+        if p.is_file():
+            results.append(p)
+    return sorted(results, key=lambda p: p.name)
 
 
 def main() -> int:
