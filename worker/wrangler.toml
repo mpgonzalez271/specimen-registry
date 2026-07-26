@@ -1,0 +1,7 @@
+name = "sar-v0"
+main = "index.js"
+compatibility_date = "2024-11-06"
+compatibility_flags = ["nodejs_compat"]
+
+# DATABASE_URL is set as a secret via `wrangler secret put DATABASE_URL`
+# Route to specimenregistry.org is managed via Cloudflare dashboard/API.
