@@ -1,0 +1,42 @@
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+*.env
+
+# Local Postgres dumps / raw ingest data
+*.sql.bak
+*.dump
+/local-data/
+/tmp-ingest/
+
+# Node / Wrangler build output
+node_modules/
+.wrangler/
+dist/
+build/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~
+
+# Test coverage / logs
+coverage/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Ingest work products that should never be committed
+/tmp-crossref/
+/tmp-abstracts/
