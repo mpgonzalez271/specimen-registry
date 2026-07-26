@@ -40,6 +40,7 @@ ADDITIONAL_INGEST_DIRS = [
     REPO_ROOT / "corpus" / "multi_site",
     REPO_ROOT / "corpus" / "late_neanderthals",
     REPO_ROOT / "corpus" / "early_neanderthals",
+    REPO_ROOT / "corpus" / "present_day_humans",
 ]
 
 # Enum whitelists (must match SCHEMA_v0.sql + v0.1)
