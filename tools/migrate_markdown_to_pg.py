@@ -31,6 +31,16 @@ INGEST_CANDIDATES = [
     REPO_ROOT / "02_denisova_pilot" / "paper_ingest",
     REPO_ROOT / "corpus" / "denisova",
 ]
+# Additional corpus subdirectories to scan for Tier-2+ ingest files.
+# Each is optional — missing directories are silently skipped.
+ADDITIONAL_INGEST_DIRS = [
+    REPO_ROOT / "corpus" / "vindija",
+    REPO_ROOT / "corpus" / "sima",
+    REPO_ROOT / "corpus" / "oase",
+    REPO_ROOT / "corpus" / "multi_site",
+    REPO_ROOT / "corpus" / "late_neanderthals",
+    REPO_ROOT / "corpus" / "early_neanderthals",
+]
 
 # Enum whitelists (must match SCHEMA_v0.sql + v0.1)
 ASSIGNMENT_METHODS = {
@@ -401,18 +411,18 @@ def upsert_publication(cur, pub, raw_md, file_name):
             'draft', %(verification_notes)s
         )
         ON CONFLICT (id) DO UPDATE SET
-            title = EXCLUDED.title,
-            authors = EXCLUDED.authors,
-            year = EXCLUDED.year,
-            journal = EXCLUDED.journal,
-            volume = EXCLUDED.volume,
-            issue = EXCLUDED.issue,
-            pages = EXCLUDED.pages,
-            publication_date = EXCLUDED.publication_date,
-            open_access_url = EXCLUDED.open_access_url,
-            abstract = EXCLUDED.abstract,
-            verification_notes = EXCLUDED.verification_notes,
-            updated_at = now()
+            title = CASE WHEN publications.verification_state IN ('pending-verification','source-locked') THEN publications.title ELSE EXCLUDED.title END,
+            authors = CASE WHEN publications.verification_state IN ('pending-verification','source-locked') THEN publications.authors ELSE EXCLUDED.authors END,
+            year = CASE WHEN publications.verification_state IN ('pending-verification','source-locked') THEN publications.year ELSE EXCLUDED.year END,
+            journal = CASE WHEN publications.verification_state IN ('pending-verification','source-locked') THEN publications.journal ELSE EXCLUDED.journal END,
+            volume = CASE WHEN publications.verification_state IN ('pending-verification','source-locked') THEN publications.volume ELSE EXCLUDED.volume END,
+            issue = CASE WHEN publications.verification_state IN ('pending-verification','source-locked') THEN publications.issue ELSE EXCLUDED.issue END,
+            pages = CASE WHEN publications.verification_state IN ('pending-verification','source-locked') THEN publications.pages ELSE EXCLUDED.pages END,
+            publication_date = CASE WHEN publications.verification_state IN ('pending-verification','source-locked') THEN publications.publication_date ELSE EXCLUDED.publication_date END,
+            open_access_url = CASE WHEN publications.verification_state IN ('pending-verification','source-locked') THEN publications.open_access_url ELSE EXCLUDED.open_access_url END,
+            abstract = CASE WHEN publications.verification_state IN ('pending-verification','source-locked') THEN publications.abstract ELSE EXCLUDED.abstract END,
+            verification_notes = CASE WHEN publications.verification_state IN ('pending-verification','source-locked') THEN publications.verification_notes ELSE EXCLUDED.verification_notes END,
+            updated_at = CASE WHEN publications.verification_state IN ('pending-verification','source-locked') THEN publications.updated_at ELSE now() END
         """,
         {**pub, "authors": json.dumps(pub["authors"]), "verification_notes": verification_notes},
     )
@@ -425,12 +435,12 @@ def upsert_site(cur, site):
         INSERT INTO sites (id, name, country, region, latitude, longitude, site_type, verification_state)
         VALUES (%(id)s, %(name)s, %(country)s, %(region)s, %(latitude)s, %(longitude)s, %(site_type)s, 'draft')
         ON CONFLICT (id) DO UPDATE SET
-            name = COALESCE(EXCLUDED.name, sites.name),
-            region = COALESCE(EXCLUDED.region, sites.region),
-            latitude = COALESCE(EXCLUDED.latitude, sites.latitude),
-            longitude = COALESCE(EXCLUDED.longitude, sites.longitude),
-            site_type = COALESCE(EXCLUDED.site_type, sites.site_type),
-            updated_at = now()
+            name = CASE WHEN sites.verification_state IN ('pending-verification','source-locked') THEN sites.name ELSE COALESCE(EXCLUDED.name, sites.name) END,
+            region = CASE WHEN sites.verification_state IN ('pending-verification','source-locked') THEN sites.region ELSE COALESCE(EXCLUDED.region, sites.region) END,
+            latitude = CASE WHEN sites.verification_state IN ('pending-verification','source-locked') THEN sites.latitude ELSE COALESCE(EXCLUDED.latitude, sites.latitude) END,
+            longitude = CASE WHEN sites.verification_state IN ('pending-verification','source-locked') THEN sites.longitude ELSE COALESCE(EXCLUDED.longitude, sites.longitude) END,
+            site_type = CASE WHEN sites.verification_state IN ('pending-verification','source-locked') THEN sites.site_type ELSE COALESCE(EXCLUDED.site_type, sites.site_type) END,
+            updated_at = CASE WHEN sites.verification_state IN ('pending-verification','source-locked') THEN sites.updated_at ELSE now() END
         """,
         site,
     )
@@ -469,15 +479,15 @@ def upsert_specimen(cur, sp):
             %(stratigraphic_context)s::jsonb, %(current_custody)s, 'draft'
         )
         ON CONFLICT (id) DO UPDATE SET
-            common_name = EXCLUDED.common_name,
-            catalog_number = EXCLUDED.catalog_number,
-            material_type = EXCLUDED.material_type,
-            taxonomic_assignment = EXCLUDED.taxonomic_assignment,
-            taxonomic_assignment_source_quote = EXCLUDED.taxonomic_assignment_source_quote,
-            assignment_method = EXCLUDED.assignment_method,
-            stratigraphic_context = EXCLUDED.stratigraphic_context,
-            current_custody = EXCLUDED.current_custody,
-            updated_at = now()
+            common_name = CASE WHEN specimens.verification_state IN ('pending-verification','source-locked') THEN specimens.common_name ELSE EXCLUDED.common_name END,
+            catalog_number = CASE WHEN specimens.verification_state IN ('pending-verification','source-locked') THEN specimens.catalog_number ELSE EXCLUDED.catalog_number END,
+            material_type = CASE WHEN specimens.verification_state IN ('pending-verification','source-locked') THEN specimens.material_type ELSE EXCLUDED.material_type END,
+            taxonomic_assignment = CASE WHEN specimens.verification_state IN ('pending-verification','source-locked') THEN specimens.taxonomic_assignment ELSE EXCLUDED.taxonomic_assignment END,
+            taxonomic_assignment_source_quote = CASE WHEN specimens.verification_state IN ('pending-verification','source-locked') THEN specimens.taxonomic_assignment_source_quote ELSE EXCLUDED.taxonomic_assignment_source_quote END,
+            assignment_method = CASE WHEN specimens.verification_state IN ('pending-verification','source-locked') THEN specimens.assignment_method ELSE EXCLUDED.assignment_method END,
+            stratigraphic_context = CASE WHEN specimens.verification_state IN ('pending-verification','source-locked') THEN specimens.stratigraphic_context ELSE EXCLUDED.stratigraphic_context END,
+            current_custody = CASE WHEN specimens.verification_state IN ('pending-verification','source-locked') THEN specimens.current_custody ELSE EXCLUDED.current_custody END,
+            updated_at = CASE WHEN specimens.verification_state IN ('pending-verification','source-locked') THEN specimens.updated_at ELSE now() END
         """,
         {**sp, "stratigraphic_context": json.dumps({"raw": sp["stratigraphic_context"]}) if sp["stratigraphic_context"] else None},
     )
@@ -515,12 +525,18 @@ def main(argv=None):
         return 1
 
     ingest_dir = find_ingest_dir()
-    files = sorted(ingest_dir.glob("T*.md"))
+    files = list(ingest_dir.glob("T*.md"))
+    for extra in ADDITIONAL_INGEST_DIRS:
+        if extra.exists():
+            files.extend(extra.glob("T*.md"))
+    # Deduplicate by absolute path
+    files = sorted({f.resolve(): f for f in files}.values(), key=lambda p: p.name)
     if not files:
         print(f"ERROR: no T*.md files found in {ingest_dir}", file=sys.stderr)
         return 1
 
-    print(f"Ingest source: {ingest_dir}")
+    print(f"Ingest source (primary): {ingest_dir}")
+    print(f"Additional dirs scanned: {[str(d) for d in ADDITIONAL_INGEST_DIRS if d.exists()]}")
     print(f"Files: {len(files)}")
     print()
 
