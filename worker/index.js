@@ -1,11 +1,18 @@
-// SAR v0.0.4 — Neon-backed specimen registry Worker
-// Adds pagination (limit/offset), /search full-text route, and small robustness fixes.
-// Reads DATABASE_URL from wrangler binding (inherit secret).
+// SAR v0.0.5 — Neon-backed specimen registry Worker
+// - Adds /license, /comparisons, /graph/:specimen_id endpoints
+// - Adds citation field to every JSON response
+// - Adds HTML detail pages for /specimens/:id, /publications/:id, /sites/:id
+// - Adds interactive /search HTML UI
+// - Adds soft in-memory rate limiting (per-Worker) and Neon access_log via ctx.waitUntil
+// - Full data license disclosure at /license (CC BY 4.0)
 
 import { neon } from "@neondatabase/serverless";
 
-const VERSION = "0.0.4-neon";
+const VERSION = "0.0.5-neon";
 const BUILD_DATE = "2026-07-26";
+const CITATION = "Specimen Registry v0.0.5 (2026). Maintained by Michael Gonzalez with AI assistance. https://specimenregistry.org. Data licensed under CC BY 4.0.";
+const LICENSE_URL = "https://specimenregistry.org/license";
+const SOURCE_URL = "https://github.com/mpgonzalez271/specimen-registry";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -16,11 +23,44 @@ const CORS = {
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 
+// ---- Rate limiting (best-effort, per-Worker instance) ---------------------
+// Sliding window: 60 req/min per IP hash, 600/hour, hard cap 5000/day.
+const RATE_LIMITS = { minute: 60, hour: 600, day: 5000 };
+const rateCache = new Map();
+
+function checkRate(ipHash) {
+  const now = Date.now();
+  const rec = rateCache.get(ipHash) ?? { minute: [], hour: [], day: [] };
+  rec.minute = rec.minute.filter((t) => now - t < 60_000);
+  rec.hour = rec.hour.filter((t) => now - t < 3_600_000);
+  rec.day = rec.day.filter((t) => now - t < 86_400_000);
+  if (rec.minute.length >= RATE_LIMITS.minute) return { ok: false, retry_after: 60, window: "minute", limit: RATE_LIMITS.minute };
+  if (rec.hour.length >= RATE_LIMITS.hour) return { ok: false, retry_after: 3600, window: "hour", limit: RATE_LIMITS.hour };
+  if (rec.day.length >= RATE_LIMITS.day) return { ok: false, retry_after: 86400, window: "day", limit: RATE_LIMITS.day };
+  rec.minute.push(now); rec.hour.push(now); rec.day.push(now);
+  rateCache.set(ipHash, rec);
+  return { ok: true, remaining: { minute: RATE_LIMITS.minute - rec.minute.length, hour: RATE_LIMITS.hour - rec.hour.length, day: RATE_LIMITS.day - rec.day.length } };
+}
+
+async function sha256Hex(input) {
+  const buf = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest("SHA-256", buf);
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// ---- Helpers --------------------------------------------------------------
+
 function json(body, init = {}) {
-  return new Response(JSON.stringify(body, null, 2), {
-    status: init.status ?? 200,
-    headers: { "content-type": "application/json; charset=utf-8", ...CORS, ...(init.headers ?? {}) },
-  });
+  const withCitation = typeof body === "object" && body !== null && !Array.isArray(body)
+    ? { citation: CITATION, license: LICENSE_URL, ...body }
+    : body;
+  const headers = { "content-type": "application/json; charset=utf-8", ...CORS, ...(init.headers ?? {}) };
+  if (init.rate_remaining) {
+    headers["X-RateLimit-Remaining-Minute"] = String(init.rate_remaining.minute);
+    headers["X-RateLimit-Remaining-Hour"] = String(init.rate_remaining.hour);
+    headers["X-RateLimit-Remaining-Day"] = String(init.rate_remaining.day);
+  }
+  return new Response(JSON.stringify(withCitation, null, 2), { status: init.status ?? 200, headers });
 }
 
 function text(body, init = {}) {
@@ -37,98 +77,152 @@ function html(body, init = {}) {
   });
 }
 
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
 function parsePaging(url) {
   const rawLimit = parseInt(url.searchParams.get("limit") ?? "", 10);
   const rawOffset = parseInt(url.searchParams.get("offset") ?? "", 10);
-  const limit = Number.isFinite(rawLimit) && rawLimit > 0
-    ? Math.min(rawLimit, MAX_LIMIT)
-    : DEFAULT_LIMIT;
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, MAX_LIMIT) : DEFAULT_LIMIT;
   const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
   return { limit, offset };
 }
 
 function pageMeta(limit, offset, count, total) {
   const nextOffset = offset + count;
-  return {
-    limit,
-    offset,
-    count,
-    total,
-    next_offset: nextOffset < total ? nextOffset : null,
-  };
+  return { limit, offset, count, total, next_offset: nextOffset < total ? nextOffset : null };
 }
 
-// ---------- Homepage --------------------------------------------------
+// ---- Layout / chrome -----------------------------------------------------
+
+function layout({ title, body, active }) {
+  const nav = [
+    ["/", "Home"],
+    ["/publications", "Publications"],
+    ["/specimens", "Specimens"],
+    ["/sites", "Sites"],
+    ["/analyses", "Analyses"],
+    ["/comparisons", "Comparisons"],
+    ["/search?q=Denisovan", "Search"],
+    ["/license", "License"],
+  ].map(([href, label]) => {
+    const is = active && href.startsWith(active) ? ' style="font-weight:600"' : "";
+    return `<a href="${href}"${is}>${escapeHtml(label)}</a>`;
+  }).join(" · ");
+  return `<!doctype html>
+<html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>${escapeHtml(title)}</title>
+<style>
+  :root { --bg:#fff; --fg:#111; --muted:#666; --border:#e2e2e2; --accent:#345; --code-bg:#f4f4f4; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 960px; margin: 1rem auto; padding: 0 1rem; color: var(--fg); line-height: 1.5; }
+  header { border-bottom: 1px solid var(--border); padding-bottom: 0.75rem; margin-bottom: 1.25rem; }
+  header .title { font-size: 1.4rem; font-weight: 600; text-decoration: none; color: var(--fg); }
+  header .nav { margin-top: 0.4rem; font-size: 0.9rem; color: var(--muted); }
+  header .nav a { text-decoration: none; color: var(--accent); margin-right: 0.1rem; }
+  header .nav a:hover { text-decoration: underline; }
+  h1 { margin: 0.2rem 0 0.4rem; font-size: 1.4rem; }
+  h2 { margin: 1.4rem 0 0.4rem; font-size: 1.1rem; }
+  .muted { color: var(--muted); }
+  code { background: var(--code-bg); padding: 0 0.25rem; border-radius: 3px; font-size: 0.9em; }
+  pre { background: var(--code-bg); padding: 0.6rem 0.75rem; border-radius: 4px; overflow-x: auto; font-size: 0.85rem; }
+  table { border-collapse: collapse; width: 100%; margin: 0.5rem 0 1rem; font-size: 0.92rem; }
+  th, td { border-bottom: 1px solid var(--border); padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 0.85rem; }
+  .pill { display: inline-block; padding: 0.1rem 0.55rem; border-radius: 999px; background: #eef; color: #224; font-size: 0.8rem; margin-right: 0.25rem; }
+  .pill.warn { background: #fef3cd; color: #6b5610; }
+  .pill.ok { background: #d7f0e4; color: #14522f; }
+  .quote { border-left: 3px solid var(--accent); padding: 0.3rem 0.8rem; background: #f7f9fc; margin: 0.5rem 0; font-style: italic; color: #234; }
+  .grid { display: grid; grid-template-columns: 200px 1fr; gap: 0.3rem 1rem; margin: 0.6rem 0; }
+  .grid dt { color: var(--muted); font-size: 0.9rem; }
+  .grid dd { margin: 0; }
+  form.search { display: flex; gap: 0.5rem; margin: 0.5rem 0 1rem; }
+  form.search input { flex: 1; padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 4px; font-size: 1rem; }
+  form.search button { padding: 0.5rem 1rem; border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 4px; cursor: pointer; }
+  footer { margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.8rem; }
+  a { color: var(--accent); }
+  .graph-box { border: 1px solid var(--border); padding: 0.75rem 1rem; border-radius: 4px; background: #fafafa; margin: 0.5rem 0; }
+  .rank { color: var(--muted); font-family: monospace; font-size: 0.85rem; }
+</style></head>
+<body>
+<header>
+  <a href="/" class="title">Specimen Registry</a>
+  <span class="muted" style="margin-left:0.4rem">v${VERSION}</span>
+  <div class="nav">${nav}</div>
+</header>
+${body}
+<footer>
+  v${VERSION} · built ${BUILD_DATE} · data <a href="/license">CC BY 4.0</a> · <a href="${SOURCE_URL}">source</a> · <a href="/version">/version</a>
+</footer>
+</body></html>`;
+}
+
+function verifPill(state) {
+  const cls = state === "source-locked" ? "ok" : state === "pending-verification" ? "warn" : "";
+  return `<span class="pill ${cls}">${escapeHtml(state ?? "draft")}</span>`;
+}
+
+// ---- Homepage ------------------------------------------------------------
 
 async function renderHomepage(sql) {
   const pubs = await sql`
     SELECT id, title, year, journal,
-           (SELECT COUNT(*) FROM specimens s WHERE s.assignment_publication = p.id
-                                                OR s.provenance_publication = p.id) AS specimen_count
-    FROM publications p
-    ORDER BY year DESC, id
+           (SELECT COUNT(*)::int FROM specimens s WHERE s.assignment_publication = p.id OR s.provenance_publication = p.id) AS specimen_count,
+           (SELECT COUNT(*)::int FROM analyses a WHERE a.publication_id = p.id) AS analysis_count
+    FROM publications p ORDER BY year DESC, id
   `;
-
   const specimenCount = (await sql`SELECT COUNT(*)::int AS n FROM specimens`)[0].n;
   const analysisCount = (await sql`SELECT COUNT(*)::int AS n FROM analyses`)[0].n;
   const siteCount = (await sql`SELECT COUNT(*)::int AS n FROM sites`)[0].n;
+  const compCount = (await sql`SELECT COUNT(*)::int AS n FROM specimen_comparisons`)[0].n;
+  const lockedCount = (await sql`SELECT COUNT(*)::int AS n FROM specimens WHERE verification_state = 'source-locked'`)[0].n;
+  const pendCount = (await sql`SELECT COUNT(*)::int AS n FROM specimens WHERE verification_state = 'pending-verification'`)[0].n;
 
-  const rows = pubs
-    .map(
-      (p) => `
+  const rows = pubs.map((p) => `
     <tr>
-      <td><a href="/publications/${encodeURIComponent(p.id)}"><code>${p.id}</code></a></td>
+      <td><a href="/publications/${encodeURIComponent(p.id)}"><code>${escapeHtml(p.id)}</code></a></td>
       <td>${escapeHtml(p.title ?? "")}</td>
       <td>${p.year ?? ""}</td>
       <td>${escapeHtml(p.journal ?? "")}</td>
       <td style="text-align:right">${p.specimen_count ?? 0}</td>
-    </tr>`
-    )
-    .join("");
+      <td style="text-align:right">${p.analysis_count ?? 0}</td>
+    </tr>`).join("");
 
-  return `<!doctype html>
-<html><head><meta charset="utf-8"/>
-<title>Specimen Registry</title>
-<style>
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #111; }
-h1 { margin-bottom: 0.2rem; } .muted { color: #666; }
-table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
-th, td { border-bottom: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
-code { background: #f4f4f4; padding: 0 0.25rem; border-radius: 3px; }
-.pill { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; background: #eef; color: #224; font-size: 0.85rem; }
-</style></head><body>
-<h1>Specimen Registry v0</h1>
-<p class="muted">Neon-backed public read API. Pilot corpus: Denisova Cave and related sites.</p>
+  const body = `
+<h1>Denisovan &amp; Neanderthal specimen corpus</h1>
+<p class="muted">Public read API + browsable index. Every claim traces to a peer-reviewed publication and a verbatim source quote.</p>
+
+<form class="search" action="/search" method="get">
+  <input name="q" placeholder="Search publications and specimens (e.g. Denisova 11, hybrid, mtDNA)" />
+  <button type="submit">Search</button>
+</form>
+
 <p>
   <span class="pill">${pubs.length} publications</span>
   <span class="pill">${specimenCount} specimens</span>
   <span class="pill">${analysisCount} analyses</span>
   <span class="pill">${siteCount} sites</span>
+  <span class="pill">${compCount} comparisons</span>
+  <span class="pill ok">${lockedCount} source-locked</span>
+  <span class="pill warn">${pendCount} pending verification</span>
 </p>
-<p>
-  API index:
-  <a href="/corpus">/corpus</a> ·
-  <a href="/publications">/publications</a> ·
-  <a href="/specimens">/specimens</a> ·
-  <a href="/sites">/sites</a> ·
-  <a href="/analyses">/analyses</a> ·
-  <a href="/search?q=Denisovan">/search?q=</a> ·
-  <a href="/version">/version</a>
-</p>
+
+<h2>Publications in the corpus</h2>
 <table>
-<thead><tr><th>ID (DOI)</th><th>Title</th><th>Year</th><th>Journal</th><th style="text-align:right">Specimens</th></tr></thead>
-<tbody>${rows}</tbody></table>
-<p class="muted" style="margin-top:2rem;font-size:0.85rem">
-  v${VERSION} · built ${BUILD_DATE} · <a href="https://github.com/mpgonzalez271/specimen-registry">source</a>
-</p>
-</body></html>`;
+  <thead><tr><th>ID (DOI)</th><th>Title</th><th>Year</th><th>Journal</th><th style="text-align:right">Specimens</th><th style="text-align:right">Analyses</th></tr></thead>
+  <tbody>${rows}</tbody>
+</table>
+
+<h2>What this is</h2>
+<p>SAR is a small, structured, citation-first registry of hominin specimens and their published analyses. It exists because much of the primary literature on Denisovans and Neanderthals is fragmented across dozens of papers with inconsistent naming conventions, and cross-specimen comparisons are hard to reconstruct without pulling every PDF.</p>
+<p>Every specimen, analysis, and comparison row is backed by a verbatim quoted passage and DOI. Records progress through three verification states: <span class="pill">draft</span> (parsed from ingest markdown), <span class="pill warn">pending-verification</span> (human reviewer has proposed a corrected assignment but not yet locked to a source quote), <span class="pill ok">source-locked</span> (human-verified against the exact quoted passage from the paper).</p>
+<p>Use <a href="/search?q=hybrid">/search</a> to full-text search. Machine access: <a href="/corpus">/corpus</a>, <a href="/publications">/publications</a>, <a href="/specimens">/specimens</a>. Every JSON response carries a <code>citation</code> field with the required attribution string.</p>
+`;
+  return layout({ title: "Specimen Registry", body, active: "/" });
 }
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
-
-// ---------- Routes ----------------------------------------------------
+// ---- JSON routes ---------------------------------------------------------
 
 async function routeCorpus(sql) {
   const pubs = await sql`
@@ -154,36 +248,31 @@ async function routeCorpus(sql) {
 async function routeSpecimens(sql, url) {
   const site_id = url.searchParams.get("site_id");
   const { limit, offset } = parsePaging(url);
-
   const total = site_id
     ? (await sql`SELECT COUNT(*)::int AS n FROM specimens WHERE site_id = ${site_id}`)[0].n
     : (await sql`SELECT COUNT(*)::int AS n FROM specimens`)[0].n;
-
   const rows = site_id
     ? await sql`
         SELECT s.id, s.site_id, s.common_name, s.taxonomic_assignment, s.assignment_method,
                s.assignment_publication, s.verification_state,
                (SELECT COUNT(*)::int FROM analyses a WHERE a.specimen_id = s.id) AS analysis_count
         FROM specimens s WHERE s.site_id = ${site_id}
-        ORDER BY s.id LIMIT ${limit} OFFSET ${offset}
-      `
+        ORDER BY s.id LIMIT ${limit} OFFSET ${offset}`
     : await sql`
         SELECT s.id, s.site_id, s.common_name, s.taxonomic_assignment, s.assignment_method,
                s.assignment_publication, s.verification_state,
                (SELECT COUNT(*)::int FROM analyses a WHERE a.specimen_id = s.id) AS analysis_count
-        FROM specimens s ORDER BY s.id LIMIT ${limit} OFFSET ${offset}
-      `;
-  return json({
-    version: VERSION,
-    filter: site_id ? { site_id } : null,
-    ...pageMeta(limit, offset, rows.length, total),
-    specimens: rows,
-  });
+        FROM specimens s ORDER BY s.id LIMIT ${limit} OFFSET ${offset}`;
+  return json({ version: VERSION, filter: site_id ? { site_id } : null, ...pageMeta(limit, offset, rows.length, total), specimens: rows });
 }
 
-async function routeSpecimenById(sql, id) {
+async function routeSpecimenById(sql, id, wantsHtml) {
   const rows = await sql`SELECT * FROM specimens WHERE id = ${id}`;
-  if (rows.length === 0) return json({ error: "not_found", id }, { status: 404 });
+  if (rows.length === 0) {
+    return wantsHtml
+      ? html(layout({ title: "Not found", body: `<h1>Specimen not found</h1><p>No specimen with id <code>${escapeHtml(id)}</code>.</p>`, active: "/specimens" }), { status: 404 })
+      : json({ error: "not_found", id }, { status: 404 });
+  }
   const spec = rows[0];
   if (spec.verification_notes && spec.verification_notes.includes("---RAW MARKDOWN---")) {
     spec.verification_notes = spec.verification_notes.split("---RAW MARKDOWN---")[0].trim();
@@ -194,32 +283,108 @@ async function routeSpecimenById(sql, id) {
     FROM analyses WHERE specimen_id = ${id} ORDER BY publication_id, method
   `;
   const site = spec.site_id ? (await sql`SELECT * FROM sites WHERE id = ${spec.site_id}`)[0] : null;
-  return json({ version: VERSION, specimen: spec, site, analyses });
+  const comparisons = await sql`
+    SELECT c.*, ps.id AS other_id, ps.common_name AS other_name, ps.taxonomic_assignment AS other_taxon
+    FROM specimen_comparisons c
+    JOIN specimens ps ON ps.id = CASE WHEN c.specimen_a_id = ${id} THEN c.specimen_b_id ELSE c.specimen_a_id END
+    WHERE c.specimen_a_id = ${id} OR c.specimen_b_id = ${id}
+    ORDER BY c.publication_id, c.comparison_type
+  `;
+
+  if (!wantsHtml) return json({ version: VERSION, specimen: spec, site, analyses, comparisons });
+
+  const analysisRows = analyses.map((a) => `
+    <tr>
+      <td><code>${escapeHtml(a.method ?? "")}</code></td>
+      <td>${escapeHtml(a.result_summary ?? "")}${a.result_summary_source_quote ? `<div class="quote">${escapeHtml(a.result_summary_source_quote)}</div>` : ""}</td>
+      <td><a href="/publications/${encodeURIComponent(a.publication_id)}"><code>${escapeHtml(a.publication_id)}</code></a></td>
+      <td>${verifPill(a.verification_state)}</td>
+    </tr>`).join("");
+
+  const compRows = comparisons.map((c) => `
+    <tr>
+      <td><a href="/specimens/${encodeURIComponent(c.other_id)}">${escapeHtml(c.other_name ?? c.other_id)}</a> <span class="muted">(${escapeHtml(c.other_taxon ?? "?")})</span></td>
+      <td><code>${escapeHtml(c.comparison_type)}</code></td>
+      <td>${escapeHtml(c.claim)}${c.claim_source_quote ? `<div class="quote">${escapeHtml(c.claim_source_quote)}</div>` : ""}</td>
+      <td><a href="/publications/${encodeURIComponent(c.publication_id)}"><code>${escapeHtml(c.publication_id)}</code></a></td>
+      <td>${verifPill(c.verification_state)}</td>
+    </tr>`).join("");
+
+  const body = `
+<h1>${escapeHtml(spec.common_name ?? spec.id)}</h1>
+<p>${verifPill(spec.verification_state)} <code>${escapeHtml(spec.id)}</code>${spec.catalog_number ? ` · catalog <code>${escapeHtml(spec.catalog_number)}</code>` : ""}</p>
+
+<dl class="grid">
+  <dt>Taxonomic assignment</dt><dd><strong>${escapeHtml(spec.taxonomic_assignment ?? "unassigned")}</strong></dd>
+  <dt>Assignment method</dt><dd>${escapeHtml(spec.assignment_method ?? "—")}</dd>
+  <dt>Assignment publication</dt><dd>${spec.assignment_publication ? `<a href="/publications/${encodeURIComponent(spec.assignment_publication)}"><code>${escapeHtml(spec.assignment_publication)}</code></a>` : "—"}</dd>
+  <dt>Provenance publication</dt><dd>${spec.provenance_publication ? `<a href="/publications/${encodeURIComponent(spec.provenance_publication)}"><code>${escapeHtml(spec.provenance_publication)}</code></a>` : "—"}</dd>
+  <dt>Material</dt><dd>${escapeHtml(spec.material_type ?? "—")}</dd>
+  <dt>Site</dt><dd>${site ? `<a href="/sites/${encodeURIComponent(site.id)}">${escapeHtml(site.name)}</a> <span class="muted">(${escapeHtml(site.country ?? "?")})</span>` : "—"}</dd>
+  <dt>Current custody</dt><dd>${escapeHtml(spec.current_custody ?? "—")}</dd>
+</dl>
+
+${spec.taxonomic_assignment_source_quote ? `<h2>Source quote (assignment)</h2><div class="quote">${escapeHtml(spec.taxonomic_assignment_source_quote)}</div>` : ""}
+
+<h2>Analyses (${analyses.length})</h2>
+${analyses.length ? `<table><thead><tr><th>Method</th><th>Result</th><th>Publication</th><th>State</th></tr></thead><tbody>${analysisRows}</tbody></table>` : `<p class="muted">No published analyses yet.</p>`}
+
+<h2>Comparisons (${comparisons.length})</h2>
+${comparisons.length ? `<table><thead><tr><th>Related to</th><th>Type</th><th>Claim</th><th>Publication</th><th>State</th></tr></thead><tbody>${compRows}</tbody></table>` : `<p class="muted">No cross-specimen comparison claims recorded yet.</p>`}
+
+<h2>Provenance graph</h2>
+<p><a href="/graph/${encodeURIComponent(spec.id)}">Specimen → papers → site → related specimens</a> (JSON)</p>
+
+<p class="muted" style="margin-top:1.5rem">JSON: <a href="/specimens/${encodeURIComponent(spec.id)}.json">/specimens/${escapeHtml(spec.id)}.json</a></p>
+`;
+  return html(layout({ title: spec.common_name ?? spec.id, body, active: "/specimens" }));
 }
 
 async function routeSites(sql, url) {
   const { limit, offset } = parsePaging(url);
   const total = (await sql`SELECT COUNT(*)::int AS n FROM sites`)[0].n;
   const rows = await sql`
-    SELECT s.*,
-           (SELECT COUNT(*)::int FROM specimens sp WHERE sp.site_id = s.id) AS specimen_count
+    SELECT s.*, (SELECT COUNT(*)::int FROM specimens sp WHERE sp.site_id = s.id) AS specimen_count
     FROM sites s ORDER BY s.id LIMIT ${limit} OFFSET ${offset}
   `;
-  return json({
-    version: VERSION,
-    ...pageMeta(limit, offset, rows.length, total),
-    sites: rows,
-  });
+  return json({ version: VERSION, ...pageMeta(limit, offset, rows.length, total), sites: rows });
 }
 
-async function routeSiteById(sql, id) {
+async function routeSiteById(sql, id, wantsHtml) {
   const rows = await sql`SELECT * FROM sites WHERE id = ${id}`;
-  if (rows.length === 0) return json({ error: "not_found", id }, { status: 404 });
+  if (rows.length === 0) {
+    return wantsHtml
+      ? html(layout({ title: "Not found", body: `<h1>Site not found</h1><p>No site with id <code>${escapeHtml(id)}</code>.</p>`, active: "/sites" }), { status: 404 })
+      : json({ error: "not_found", id }, { status: 404 });
+  }
+  const site = rows[0];
   const specimens = await sql`
     SELECT id, common_name, taxonomic_assignment, assignment_method, verification_state
     FROM specimens WHERE site_id = ${id} ORDER BY id
   `;
-  return json({ version: VERSION, site: rows[0], specimens });
+  if (!wantsHtml) return json({ version: VERSION, site, specimens });
+
+  const specRows = specimens.map((s) => `
+    <tr>
+      <td><a href="/specimens/${encodeURIComponent(s.id)}">${escapeHtml(s.common_name ?? s.id)}</a></td>
+      <td>${escapeHtml(s.taxonomic_assignment ?? "unassigned")}</td>
+      <td>${escapeHtml(s.assignment_method ?? "—")}</td>
+      <td>${verifPill(s.verification_state)}</td>
+    </tr>`).join("");
+
+  const body = `
+<h1>${escapeHtml(site.name)}</h1>
+<p>${verifPill(site.verification_state)} <code>${escapeHtml(site.id)}</code></p>
+<dl class="grid">
+  <dt>Country</dt><dd>${escapeHtml(site.country ?? "—")}</dd>
+  <dt>Region</dt><dd>${escapeHtml(site.region ?? "—")}</dd>
+  <dt>Coordinates</dt><dd>${site.latitude ?? "—"}${site.longitude ? `, ${site.longitude}` : ""}</dd>
+  <dt>Site type</dt><dd>${escapeHtml(site.site_type ?? "—")}</dd>
+</dl>
+<h2>Specimens from this site (${specimens.length})</h2>
+${specimens.length ? `<table><thead><tr><th>Specimen</th><th>Taxonomic assignment</th><th>Method</th><th>State</th></tr></thead><tbody>${specRows}</tbody></table>` : `<p class="muted">No specimens recorded.</p>`}
+`;
+  return html(layout({ title: site.name, body, active: "/sites" }));
 }
 
 async function routePublications(sql, url) {
@@ -228,145 +393,365 @@ async function routePublications(sql, url) {
   const rows = await sql`
     SELECT id, title, year, journal, authors, verification_state,
            (SELECT COUNT(*)::int FROM analyses a WHERE a.publication_id = p.id) AS analysis_count,
-           (SELECT COUNT(*)::int FROM specimens s
-              WHERE s.assignment_publication = p.id OR s.provenance_publication = p.id) AS specimen_count
+           (SELECT COUNT(*)::int FROM specimens s WHERE s.assignment_publication = p.id OR s.provenance_publication = p.id) AS specimen_count
     FROM publications p ORDER BY year DESC, id LIMIT ${limit} OFFSET ${offset}
   `;
-  return json({
-    version: VERSION,
-    ...pageMeta(limit, offset, rows.length, total),
-    publications: rows,
-  });
+  return json({ version: VERSION, ...pageMeta(limit, offset, rows.length, total), publications: rows });
 }
 
-async function routePublicationById(sql, id) {
+async function routePublicationById(sql, id, wantsHtml) {
   const rows = await sql`SELECT * FROM publications WHERE id = ${id}`;
-  if (rows.length === 0) return json({ error: "not_found", id }, { status: 404 });
+  if (rows.length === 0) {
+    return wantsHtml
+      ? html(layout({ title: "Not found", body: `<h1>Publication not found</h1><p>No publication with id <code>${escapeHtml(id)}</code>.</p>`, active: "/publications" }), { status: 404 })
+      : json({ error: "not_found", id }, { status: 404 });
+  }
   const pub = rows[0];
   if (pub.verification_notes && pub.verification_notes.includes("---RAW MARKDOWN---")) {
     pub.verification_notes = pub.verification_notes.split("---RAW MARKDOWN---")[0].trim();
   }
   const specimens = await sql`
     SELECT id, common_name, taxonomic_assignment, assignment_method, verification_state
-    FROM specimens
-    WHERE assignment_publication = ${id} OR provenance_publication = ${id}
-    ORDER BY id
+    FROM specimens WHERE assignment_publication = ${id} OR provenance_publication = ${id} ORDER BY id
   `;
   const analyses = await sql`
     SELECT id, specimen_id, method, dating_method, lab, result_summary, verification_state
     FROM analyses WHERE publication_id = ${id} ORDER BY specimen_id, method
   `;
-  return json({ version: VERSION, publication: pub, specimens, analyses });
+  if (!wantsHtml) return json({ version: VERSION, publication: pub, specimens, analyses });
+
+  const authorLine = Array.isArray(pub.authors) ? pub.authors.slice(0, 6).join(", ") + (pub.authors.length > 6 ? `, et al. (${pub.authors.length} authors)` : "") : "";
+  const specRows = specimens.map((s) => `
+    <tr>
+      <td><a href="/specimens/${encodeURIComponent(s.id)}">${escapeHtml(s.common_name ?? s.id)}</a></td>
+      <td>${escapeHtml(s.taxonomic_assignment ?? "unassigned")}</td>
+      <td>${verifPill(s.verification_state)}</td>
+    </tr>`).join("");
+  const anRows = analyses.map((a) => `
+    <tr>
+      <td><a href="/specimens/${encodeURIComponent(a.specimen_id)}"><code>${escapeHtml(a.specimen_id)}</code></a></td>
+      <td><code>${escapeHtml(a.method ?? "")}</code></td>
+      <td>${escapeHtml(a.result_summary ?? "")}</td>
+      <td>${verifPill(a.verification_state)}</td>
+    </tr>`).join("");
+
+  const body = `
+<h1>${escapeHtml(pub.title ?? pub.id)}</h1>
+<p>${verifPill(pub.verification_state)} <code>${escapeHtml(pub.id)}</code></p>
+<dl class="grid">
+  <dt>Year</dt><dd>${pub.year ?? "—"}</dd>
+  <dt>Journal</dt><dd>${escapeHtml(pub.journal ?? "—")}${pub.volume ? `, ${escapeHtml(pub.volume)}` : ""}${pub.issue ? `(${escapeHtml(pub.issue)})` : ""}${pub.pages ? ` ${escapeHtml(pub.pages)}` : ""}</dd>
+  <dt>Authors</dt><dd>${escapeHtml(authorLine)}</dd>
+  <dt>DOI / URL</dt><dd>${pub.open_access_url ? `<a href="${escapeHtml(pub.open_access_url)}">${escapeHtml(pub.open_access_url)}</a>` : "—"}</dd>
+</dl>
+
+${pub.abstract ? `<h2>Abstract</h2><p>${escapeHtml(pub.abstract)}</p>` : ""}
+
+<h2>Specimens referenced (${specimens.length})</h2>
+${specimens.length ? `<table><thead><tr><th>Specimen</th><th>Taxonomic assignment</th><th>State</th></tr></thead><tbody>${specRows}</tbody></table>` : `<p class="muted">No specimens attached.</p>`}
+
+<h2>Analyses in this publication (${analyses.length})</h2>
+${analyses.length ? `<table><thead><tr><th>Specimen</th><th>Method</th><th>Result summary</th><th>State</th></tr></thead><tbody>${anRows}</tbody></table>` : `<p class="muted">No structured analyses recorded.</p>`}
+`;
+  return html(layout({ title: pub.title ?? pub.id, body, active: "/publications" }));
 }
 
 async function routeAnalyses(sql, url) {
   const spec = url.searchParams.get("specimen_id");
   const pub = url.searchParams.get("publication_id");
   const { limit, offset } = parsePaging(url);
-
-  let rows;
-  let total;
+  let rows, total;
   if (spec) {
     total = (await sql`SELECT COUNT(*)::int AS n FROM analyses WHERE specimen_id = ${spec}`)[0].n;
-    rows = await sql`
-      SELECT * FROM analyses WHERE specimen_id = ${spec}
-      ORDER BY publication_id, method LIMIT ${limit} OFFSET ${offset}
-    `;
+    rows = await sql`SELECT * FROM analyses WHERE specimen_id = ${spec} ORDER BY publication_id, method LIMIT ${limit} OFFSET ${offset}`;
   } else if (pub) {
     total = (await sql`SELECT COUNT(*)::int AS n FROM analyses WHERE publication_id = ${pub}`)[0].n;
-    rows = await sql`
-      SELECT * FROM analyses WHERE publication_id = ${pub}
-      ORDER BY specimen_id, method LIMIT ${limit} OFFSET ${offset}
-    `;
+    rows = await sql`SELECT * FROM analyses WHERE publication_id = ${pub} ORDER BY specimen_id, method LIMIT ${limit} OFFSET ${offset}`;
   } else {
     total = (await sql`SELECT COUNT(*)::int AS n FROM analyses`)[0].n;
-    rows = await sql`
-      SELECT * FROM analyses
-      ORDER BY specimen_id, publication_id, method LIMIT ${limit} OFFSET ${offset}
-    `;
+    rows = await sql`SELECT * FROM analyses ORDER BY specimen_id, publication_id, method LIMIT ${limit} OFFSET ${offset}`;
   }
-  return json({
-    version: VERSION,
-    filter: spec ? { specimen_id: spec } : pub ? { publication_id: pub } : null,
-    ...pageMeta(limit, offset, rows.length, total),
-    analyses: rows,
-  });
+  return json({ version: VERSION, filter: spec ? { specimen_id: spec } : pub ? { publication_id: pub } : null, ...pageMeta(limit, offset, rows.length, total), analyses: rows });
 }
 
-async function routeSearch(sql, url) {
+async function routeComparisons(sql, url, wantsHtml) {
+  const specA = url.searchParams.get("specimen_id");
+  const pub = url.searchParams.get("publication_id");
+  const type = url.searchParams.get("type");
+  const { limit, offset } = parsePaging(url);
+
+  const whereClauses = [];
+  const params = {};
+  if (specA) { whereClauses.push("(specimen_a_id = ${a} OR specimen_b_id = ${a})"); params.a = specA; }
+  if (pub) { whereClauses.push("publication_id = ${p}"); params.p = pub; }
+  if (type) { whereClauses.push("comparison_type = ${t}"); params.t = type; }
+
+  const rows = (specA && pub)
+    ? await sql`SELECT * FROM specimen_comparisons WHERE (specimen_a_id = ${specA} OR specimen_b_id = ${specA}) AND publication_id = ${pub} ORDER BY id DESC LIMIT ${limit} OFFSET ${offset}`
+    : specA
+    ? await sql`SELECT * FROM specimen_comparisons WHERE specimen_a_id = ${specA} OR specimen_b_id = ${specA} ORDER BY id DESC LIMIT ${limit} OFFSET ${offset}`
+    : pub
+    ? await sql`SELECT * FROM specimen_comparisons WHERE publication_id = ${pub} ORDER BY id DESC LIMIT ${limit} OFFSET ${offset}`
+    : type
+    ? await sql`SELECT * FROM specimen_comparisons WHERE comparison_type = ${type} ORDER BY id DESC LIMIT ${limit} OFFSET ${offset}`
+    : await sql`SELECT * FROM specimen_comparisons ORDER BY id DESC LIMIT ${limit} OFFSET ${offset}`;
+
+  const total = (specA && pub)
+    ? (await sql`SELECT COUNT(*)::int AS n FROM specimen_comparisons WHERE (specimen_a_id = ${specA} OR specimen_b_id = ${specA}) AND publication_id = ${pub}`)[0].n
+    : specA
+    ? (await sql`SELECT COUNT(*)::int AS n FROM specimen_comparisons WHERE specimen_a_id = ${specA} OR specimen_b_id = ${specA}`)[0].n
+    : pub
+    ? (await sql`SELECT COUNT(*)::int AS n FROM specimen_comparisons WHERE publication_id = ${pub}`)[0].n
+    : type
+    ? (await sql`SELECT COUNT(*)::int AS n FROM specimen_comparisons WHERE comparison_type = ${type}`)[0].n
+    : (await sql`SELECT COUNT(*)::int AS n FROM specimen_comparisons`)[0].n;
+
+  if (!wantsHtml) return json({ version: VERSION, filter: { specimen_id: specA, publication_id: pub, type }, ...pageMeta(limit, offset, rows.length, total), comparisons: rows });
+
+  const compRows = rows.map((c) => `
+    <tr>
+      <td><a href="/specimens/${encodeURIComponent(c.specimen_a_id)}"><code>${escapeHtml(c.specimen_a_id)}</code></a> ↔ <a href="/specimens/${encodeURIComponent(c.specimen_b_id)}"><code>${escapeHtml(c.specimen_b_id)}</code></a></td>
+      <td><code>${escapeHtml(c.comparison_type)}</code></td>
+      <td>${escapeHtml(c.claim)}${c.claim_source_quote ? `<div class="quote">${escapeHtml(c.claim_source_quote)}</div>` : ""}</td>
+      <td><a href="/publications/${encodeURIComponent(c.publication_id)}"><code>${escapeHtml(c.publication_id)}</code></a></td>
+      <td>${verifPill(c.verification_state)}</td>
+    </tr>`).join("");
+
+  const body = `
+<h1>Cross-specimen comparisons</h1>
+<p class="muted">Published claims of relatedness, kinship, sister-lineage status, or introgression source between pairs of specimens. Every row cites a specific publication with a verbatim quote where possible.</p>
+<p>${total} total.</p>
+${rows.length ? `<table><thead><tr><th>Pair</th><th>Type</th><th>Claim</th><th>Publication</th><th>State</th></tr></thead><tbody>${compRows}</tbody></table>` : `<p class="muted">No comparisons recorded yet.</p>`}
+`;
+  return html(layout({ title: "Cross-specimen comparisons", body, active: "/comparisons" }));
+}
+
+async function routeGraph(sql, specimenId) {
+  const specRows = await sql`SELECT id, common_name, taxonomic_assignment, site_id, assignment_publication, provenance_publication FROM specimens WHERE id = ${specimenId}`;
+  if (specRows.length === 0) return json({ error: "not_found", id: specimenId }, { status: 404 });
+  const spec = specRows[0];
+
+  const pubs = await sql`
+    SELECT DISTINCT p.id, p.title, p.year, p.journal
+    FROM publications p
+    WHERE p.id = ${spec.assignment_publication}
+       OR p.id = ${spec.provenance_publication}
+       OR p.id IN (SELECT publication_id FROM analyses WHERE specimen_id = ${specimenId})
+    ORDER BY p.year DESC, p.id
+  `;
+  const site = spec.site_id ? (await sql`SELECT id, name, country FROM sites WHERE id = ${spec.site_id}`)[0] : null;
+  const compSpecs = await sql`
+    SELECT DISTINCT s.id, s.common_name, s.taxonomic_assignment, c.comparison_type
+    FROM specimen_comparisons c
+    JOIN specimens s ON s.id = CASE WHEN c.specimen_a_id = ${specimenId} THEN c.specimen_b_id ELSE c.specimen_a_id END
+    WHERE c.specimen_a_id = ${specimenId} OR c.specimen_b_id = ${specimenId}
+  `;
+
+  const nodes = [
+    { id: `specimen:${spec.id}`, kind: "specimen", label: spec.common_name ?? spec.id, taxonomic_assignment: spec.taxonomic_assignment, primary: true },
+    ...pubs.map((p) => ({ id: `publication:${p.id}`, kind: "publication", label: `${p.title} (${p.year})`, year: p.year, journal: p.journal })),
+    ...(site ? [{ id: `site:${site.id}`, kind: "site", label: site.name, country: site.country }] : []),
+    ...compSpecs.map((s) => ({ id: `specimen:${s.id}`, kind: "specimen", label: s.common_name ?? s.id, taxonomic_assignment: s.taxonomic_assignment })),
+  ];
+
+  const edges = [];
+  if (spec.assignment_publication) edges.push({ from: `specimen:${spec.id}`, to: `publication:${spec.assignment_publication}`, kind: "assignment-source" });
+  if (spec.provenance_publication && spec.provenance_publication !== spec.assignment_publication) edges.push({ from: `specimen:${spec.id}`, to: `publication:${spec.provenance_publication}`, kind: "provenance-source" });
+  if (site) edges.push({ from: `specimen:${spec.id}`, to: `site:${site.id}`, kind: "excavated-at" });
+  for (const p of pubs) {
+    if (p.id !== spec.assignment_publication && p.id !== spec.provenance_publication) {
+      edges.push({ from: `specimen:${spec.id}`, to: `publication:${p.id}`, kind: "analyzed-in" });
+    }
+  }
+  for (const s of compSpecs) {
+    edges.push({ from: `specimen:${spec.id}`, to: `specimen:${s.id}`, kind: s.comparison_type });
+  }
+
+  return json({ version: VERSION, root: `specimen:${spec.id}`, node_count: nodes.length, edge_count: edges.length, nodes, edges });
+}
+
+async function routeSearch(sql, url, wantsHtml) {
   const q = (url.searchParams.get("q") ?? "").trim();
   const type = (url.searchParams.get("type") ?? "").trim().toLowerCase();
   const { limit, offset } = parsePaging(url);
 
-  if (!q) {
-    return json({
-      error: "missing_query",
-      message: "?q= is required. Optional: ?type=publication|specimen&limit=&offset=",
-    }, { status: 400 });
+  if (wantsHtml) {
+    if (!q) {
+      const body = `<h1>Search</h1>
+<form class="search" action="/search" method="get">
+  <input name="q" placeholder="Search publications and specimens" autofocus />
+  <button type="submit">Search</button>
+</form>
+<p class="muted">Try: <a href="/search?q=hybrid">hybrid</a> · <a href="/search?q=mtDNA">mtDNA</a> · <a href="/search?q=Denisova%2011">Denisova 11</a> · <a href="/search?q=Baishiya">Baishiya</a> · <a href="/search?q=ZooMS">ZooMS</a></p>`;
+      return html(layout({ title: "Search", body, active: "/search" }));
+    }
+    return htmlSearchResults(sql, q, limit, offset);
   }
-  if (type && type !== "publication" && type !== "specimen") {
-    return json({
-      error: "invalid_type",
-      message: "type must be 'publication' or 'specimen' (or omitted for both)",
-    }, { status: 400 });
-  }
+
+  if (!q) return json({ error: "missing_query", message: "?q= is required. Optional: ?type=publication|specimen&limit=&offset=" }, { status: 400 });
+  if (type && type !== "publication" && type !== "specimen") return json({ error: "invalid_type", message: "type must be 'publication' or 'specimen' (or omitted for both)" }, { status: 400 });
 
   const results = { query: q, type: type || "both", limit, offset };
-
   if (type === "" || type === "publication") {
-    const total = (await sql`
-      SELECT COUNT(*)::int AS n FROM publications
-      WHERE fts_tsv @@ plainto_tsquery('english', ${q})
-    `)[0].n;
+    const total = (await sql`SELECT COUNT(*)::int AS n FROM publications WHERE fts_tsv @@ plainto_tsquery('english', ${q})`)[0].n;
     const rows = await sql`
-      SELECT id, title, year, journal,
-             ts_rank(fts_tsv, plainto_tsquery('english', ${q})) AS rank
-      FROM publications
-      WHERE fts_tsv @@ plainto_tsquery('english', ${q})
-      ORDER BY rank DESC, year DESC
-      LIMIT ${limit} OFFSET ${offset}
-    `;
-    results.publications = {
-      total,
-      count: rows.length,
-      next_offset: offset + rows.length < total ? offset + rows.length : null,
-      hits: rows,
-    };
+      SELECT id, title, year, journal, ts_rank(fts_tsv, plainto_tsquery('english', ${q})) AS rank
+      FROM publications WHERE fts_tsv @@ plainto_tsquery('english', ${q})
+      ORDER BY rank DESC, year DESC LIMIT ${limit} OFFSET ${offset}`;
+    results.publications = { total, count: rows.length, next_offset: offset + rows.length < total ? offset + rows.length : null, hits: rows };
   }
-
   if (type === "" || type === "specimen") {
-    const total = (await sql`
-      SELECT COUNT(*)::int AS n FROM specimens
-      WHERE fts_tsv @@ plainto_tsquery('english', ${q})
-    `)[0].n;
+    const total = (await sql`SELECT COUNT(*)::int AS n FROM specimens WHERE fts_tsv @@ plainto_tsquery('english', ${q})`)[0].n;
     const rows = await sql`
       SELECT id, common_name, taxonomic_assignment, assignment_method, verification_state,
              ts_rank(fts_tsv, plainto_tsquery('english', ${q})) AS rank
-      FROM specimens
-      WHERE fts_tsv @@ plainto_tsquery('english', ${q})
-      ORDER BY rank DESC, id
-      LIMIT ${limit} OFFSET ${offset}
-    `;
-    results.specimens = {
-      total,
-      count: rows.length,
-      next_offset: offset + rows.length < total ? offset + rows.length : null,
-      hits: rows,
-    };
+      FROM specimens WHERE fts_tsv @@ plainto_tsquery('english', ${q})
+      ORDER BY rank DESC, id LIMIT ${limit} OFFSET ${offset}`;
+    results.specimens = { total, count: rows.length, next_offset: offset + rows.length < total ? offset + rows.length : null, hits: rows };
   }
-
   return json({ version: VERSION, ...results });
 }
 
-// ---------- Entry ----------------------------------------------------
+async function htmlSearchResults(sql, q, limit, offset) {
+  const [pubHits, specHits] = await Promise.all([
+    sql`
+      SELECT id, title, year, journal, ts_rank(fts_tsv, plainto_tsquery('english', ${q})) AS rank
+      FROM publications WHERE fts_tsv @@ plainto_tsquery('english', ${q})
+      ORDER BY rank DESC, year DESC LIMIT ${limit} OFFSET ${offset}`,
+    sql`
+      SELECT id, common_name, taxonomic_assignment, assignment_method, verification_state,
+             ts_rank(fts_tsv, plainto_tsquery('english', ${q})) AS rank
+      FROM specimens WHERE fts_tsv @@ plainto_tsquery('english', ${q})
+      ORDER BY rank DESC, id LIMIT ${limit} OFFSET ${offset}`,
+  ]);
+
+  const pubRows = pubHits.map((p) => `
+    <tr>
+      <td><a href="/publications/${encodeURIComponent(p.id)}">${escapeHtml(p.title ?? p.id)}</a></td>
+      <td>${p.year ?? ""}</td>
+      <td>${escapeHtml(p.journal ?? "")}</td>
+      <td class="rank">${(p.rank ?? 0).toFixed(3)}</td>
+    </tr>`).join("");
+  const specRows = specHits.map((s) => `
+    <tr>
+      <td><a href="/specimens/${encodeURIComponent(s.id)}">${escapeHtml(s.common_name ?? s.id)}</a></td>
+      <td>${escapeHtml(s.taxonomic_assignment ?? "unassigned")}</td>
+      <td>${verifPill(s.verification_state)}</td>
+      <td class="rank">${(s.rank ?? 0).toFixed(3)}</td>
+    </tr>`).join("");
+
+  const body = `
+<h1>Search: <em>${escapeHtml(q)}</em></h1>
+<form class="search" action="/search" method="get">
+  <input name="q" value="${escapeHtml(q)}" />
+  <button type="submit">Search</button>
+</form>
+
+<h2>Publications (${pubHits.length})</h2>
+${pubHits.length ? `<table><thead><tr><th>Title</th><th>Year</th><th>Journal</th><th class="rank">rank</th></tr></thead><tbody>${pubRows}</tbody></table>` : `<p class="muted">No matches.</p>`}
+
+<h2>Specimens (${specHits.length})</h2>
+${specHits.length ? `<table><thead><tr><th>Specimen</th><th>Taxonomic assignment</th><th>State</th><th class="rank">rank</th></tr></thead><tbody>${specRows}</tbody></table>` : `<p class="muted">No matches.</p>`}
+
+<p class="muted"><a href="/search?q=${encodeURIComponent(q)}&type=publication">JSON: publications only</a> · <a href="/search?q=${encodeURIComponent(q)}&type=specimen">JSON: specimens only</a></p>
+`;
+  return html(layout({ title: `Search: ${q}`, body, active: "/search" }));
+}
+
+function routeLicense(wantsHtml) {
+  const licenseData = {
+    version: VERSION,
+    license: "CC BY 4.0",
+    license_url: "https://creativecommons.org/licenses/by/4.0/legalcode",
+    attribution_required: CITATION,
+    covers: [
+      "All specimen, publication, site, analysis, and comparison rows in this registry",
+      "The compilation and structured metadata",
+      "Verbatim quoted passages from primary literature are included under fair use for scholarship and are attributed to their original publishers",
+    ],
+    does_not_cover: [
+      "Full text of any peer-reviewed publication referenced by SAR",
+      "Underlying paper copyrights, which remain with the original authors and publishers",
+    ],
+    contact: "See https://github.com/mpgonzalez271/specimen-registry for source and issue tracker",
+  };
+  if (!wantsHtml) return json(licenseData);
+
+  const body = `
+<h1>Data license — CC BY 4.0</h1>
+<p>All specimen, publication, site, analysis, and comparison rows in this registry are licensed under the <a href="https://creativecommons.org/licenses/by/4.0/legalcode">Creative Commons Attribution 4.0 International License</a>.</p>
+
+<h2>You are free to</h2>
+<ul>
+  <li><strong>Share</strong> — copy and redistribute the material in any medium or format</li>
+  <li><strong>Adapt</strong> — remix, transform, and build upon the material for any purpose, including commercially</li>
+</ul>
+
+<h2>Under the following terms</h2>
+<p><strong>Attribution</strong> — you must give appropriate credit, provide a link to the license, and indicate if changes were made. Every JSON response from this API carries a <code>citation</code> field with the exact string below.</p>
+
+<h2>How to attribute</h2>
+<pre>${escapeHtml(CITATION)}</pre>
+
+<h2>What CC BY 4.0 covers here</h2>
+<ul>
+  <li>The compilation and structured metadata</li>
+  <li>Verification state, source-quote provenance chain, and cross-specimen comparison rows</li>
+  <li>Verbatim quoted passages are included under fair use for scholarship and are attributed to the original publisher</li>
+</ul>
+
+<h2>What CC BY 4.0 does <em>not</em> cover</h2>
+<ul>
+  <li>Full text of any peer-reviewed publication referenced by SAR</li>
+  <li>Underlying paper copyrights, which remain with the original authors and publishers</li>
+</ul>
+
+<p class="muted"><a href="/license.json">JSON: /license.json</a> · <a href="https://github.com/mpgonzalez271/specimen-registry/blob/main/DATA_LICENSE.md">Repository DATA_LICENSE.md</a></p>
+`;
+  return html(layout({ title: "License", body, active: "/license" }));
+}
+
+// ---- Logging -------------------------------------------------------------
+
+async function logAccess(sql, entry) {
+  try {
+    await sql`
+      INSERT INTO access_log (path, method, status, ip_hash, ua, duration_ms, ray_id)
+      VALUES (${entry.path}, ${entry.method}, ${entry.status}, ${entry.ip_hash}, ${entry.ua}, ${entry.duration_ms}, ${entry.ray_id})
+    `;
+  } catch (e) { /* Never fail requests due to log write */ }
+}
+
+// ---- Entry ---------------------------------------------------------------
+
+function wantsHtml(request) {
+  const accept = request.headers.get("accept") ?? "";
+  return accept.includes("text/html") && !accept.includes("application/json");
+}
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
+    const started = Date.now();
     const url = new URL(request.url);
-    const path = url.pathname.replace(/\/+$/, "") || "/";
+    let path = url.pathname.replace(/\/+$/, "") || "/";
 
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
+    // Explicit .json suffix forces JSON regardless of Accept header
+    let forceJson = false;
+    if (path.endsWith(".json")) { path = path.slice(0, -5) || "/"; forceJson = true; }
+
+    const acceptsHtml = !forceJson && wantsHtml(request);
+
+    // Rate limit
+    const ip = request.headers.get("cf-connecting-ip") ?? "0.0.0.0";
+    const ipHash = await sha256Hex(ip + "|sar-v0-salt");
+    const rate = checkRate(ipHash);
+    if (!rate.ok) {
+      return json({ error: "rate_limited", window: rate.window, retry_after: rate.retry_after, limit: rate.limit }, { status: 429, headers: { "Retry-After": String(rate.retry_after) } });
+    }
+
+    // Simple routes
     if (path === "/health") return json({ status: "ok", ts: new Date().toISOString() });
     if (path === "/version") {
       return json({
@@ -375,40 +760,58 @@ export default {
         build_date: BUILD_DATE,
         stage: "pilot-corpus",
         backing_store: "neon-postgres",
-        capabilities: ["pagination", "fts-search"],
-      });
+        capabilities: ["pagination", "fts-search", "html-browser", "comparisons", "provenance-graph", "license", "rate-limit", "access-log"],
+      }, { rate_remaining: rate.remaining });
+    }
+    if (path === "/license") return routeLicense(acceptsHtml);
+    if (path === "/robots.txt") return text("User-agent: *\nAllow: /\nSitemap: https://specimenregistry.org/sitemap.txt\n");
+    if (path === "/sitemap.txt") {
+      const paths = ["/", "/publications", "/specimens", "/sites", "/analyses", "/comparisons", "/search", "/license", "/version"];
+      return text(paths.map((p) => `https://specimenregistry.org${p}`).join("\n") + "\n");
     }
 
-    if (!env.DATABASE_URL) {
-      return json({ error: "DATABASE_URL not configured" }, { status: 500 });
-    }
+    if (!env.DATABASE_URL) return json({ error: "DATABASE_URL not configured" }, { status: 500 });
     const sql = neon(env.DATABASE_URL);
 
+    let response;
     try {
-      if (path === "/") return html(await renderHomepage(sql));
-      if (path === "/corpus") return await routeCorpus(sql);
-      if (path === "/search") return await routeSearch(sql, url);
-
-      if (path === "/specimens") return await routeSpecimens(sql, url);
-      const specM = path.match(/^\/specimens\/([^/]+)$/);
-      if (specM) return await routeSpecimenById(sql, decodeURIComponent(specM[1]));
-
-      if (path === "/sites") return await routeSites(sql, url);
-      const siteM = path.match(/^\/sites\/([^/]+)$/);
-      if (siteM) return await routeSiteById(sql, decodeURIComponent(siteM[1]));
-
-      if (path === "/publications") return await routePublications(sql, url);
-      const pubM = path.match(/^\/publications\/([^/]+)$/);
-      if (pubM) return await routePublicationById(sql, decodeURIComponent(pubM[1]));
-
-      if (path === "/analyses") return await routeAnalyses(sql, url);
-
-      const legacy = path.match(/^\/corpus\/([^/]+)$/);
-      if (legacy) return await routePublicationById(sql, decodeURIComponent(legacy[1]));
-
-      return json({ error: "not_found", path }, { status: 404 });
+      if (path === "/") response = html(await renderHomepage(sql));
+      else if (path === "/corpus") response = await routeCorpus(sql);
+      else if (path === "/search") response = await routeSearch(sql, url, acceptsHtml);
+      else if (path === "/specimens") response = await routeSpecimens(sql, url);
+      else if (path === "/sites") response = await routeSites(sql, url);
+      else if (path === "/publications") response = await routePublications(sql, url);
+      else if (path === "/analyses") response = await routeAnalyses(sql, url);
+      else if (path === "/comparisons") response = await routeComparisons(sql, url, acceptsHtml);
+      else {
+        const specM = path.match(/^\/specimens\/([^/]+)$/);
+        const siteM = path.match(/^\/sites\/([^/]+)$/);
+        const pubM = path.match(/^\/publications\/([^/]+)$/);
+        const graphM = path.match(/^\/graph\/([^/]+)$/);
+        const legacyM = path.match(/^\/corpus\/([^/]+)$/);
+        if (specM) response = await routeSpecimenById(sql, decodeURIComponent(specM[1]), acceptsHtml);
+        else if (siteM) response = await routeSiteById(sql, decodeURIComponent(siteM[1]), acceptsHtml);
+        else if (pubM) response = await routePublicationById(sql, decodeURIComponent(pubM[1]), acceptsHtml);
+        else if (graphM) response = await routeGraph(sql, decodeURIComponent(graphM[1]));
+        else if (legacyM) response = await routePublicationById(sql, decodeURIComponent(legacyM[1]), acceptsHtml);
+        else response = json({ error: "not_found", path }, { status: 404 });
+      }
     } catch (err) {
-      return json({ error: "internal", message: String(err?.message ?? err) }, { status: 500 });
+      response = json({ error: "internal", message: String(err?.message ?? err) }, { status: 500 });
     }
+
+    const duration_ms = Date.now() - started;
+    if (ctx && ctx.waitUntil) {
+      ctx.waitUntil(logAccess(sql, {
+        path,
+        method: request.method,
+        status: response.status,
+        ip_hash: ipHash,
+        ua: (request.headers.get("user-agent") ?? "").slice(0, 500),
+        duration_ms,
+        ray_id: request.headers.get("cf-ray") ?? null,
+      }));
+    }
+    return response;
   },
 };
