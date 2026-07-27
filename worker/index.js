@@ -8,7 +8,7 @@
 
 import { neon } from "@neondatabase/serverless";
 
-const VERSION = "0.0.8-neon";
+const VERSION = "0.0.9-neon";
 const BUILD_DATE = "2026-07-26";
 const CITATION = "Specimen Registry v0.0.7 (2026). Maintained by Michael Gonzalez with AI assistance. https://specimenregistry.org. Data licensed under CC BY 4.0.";
 const LICENSE_URL = "https://specimenregistry.org/license";
@@ -495,6 +495,8 @@ function routeOpenAPI() {
       "/timeline": { get: { summary: "Specimens with their earliest describing publication, ordered by publication year", responses: { "200": { description: "timeline JSON" } } } },
       "/audit": { get: { summary: "Recent access log entries (last N=20 default, max 100). Only public routes; IPs are one-way hashed.", parameters: [{ name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 20 } }], responses: { "200": { description: "audit JSON" } } } },
       "/methods": { get: { summary: "Distinct assignment methods (how specimens were taxonomically assigned) and analysis types (techniques applied in individual papers), with counts.", responses: { "200": { description: "methods JSON" } } } },
+      "/related/{id}": { get: { summary: "Neighbor specimens across three relatedness surfaces: shared publication, same site, and specimen_comparisons row.", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "related JSON" }, "404": { description: "specimen not found" } } } },
+      "/export.csv": { get: { summary: "Bulk CSV export. Provide ?table=publications or ?table=specimens (default: specimens).", parameters: [{ name: "table", in: "query", schema: { type: "string", enum: ["publications", "specimens", "analyses", "comparisons"], default: "specimens" } }], responses: { "200": { description: "CSV body" } } } },
       "/publications": { get: { summary: "List publications (paginated)", parameters: [{ name: "limit", in: "query", schema: { type: "integer", default: 25, maximum: 100 } }, { name: "offset", in: "query", schema: { type: "integer", default: 0 } }], responses: { "200": { description: "publications JSON" } } } },
       "/publications/{doi}": { get: { summary: "Single publication by DOI", parameters: [{ name: "doi", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "publication JSON or HTML" } } } },
       "/specimens": { get: { summary: "List specimens (paginated)", parameters: [{ name: "limit", in: "query", schema: { type: "integer", default: 25, maximum: 100 } }, { name: "offset", in: "query", schema: { type: "integer", default: 0 } }, { name: "site_id", in: "query", schema: { type: "string" } }], responses: { "200": { description: "specimens JSON" } } } },
@@ -569,6 +571,99 @@ async function routeAudit(sql, url) {
     limit,
     audit: rows,
     note: "IPs are one-way hashed with a rotating salt; no reverse lookup possible. User-Agent may be null for programmatic clients. This endpoint itself is included in the log.",
+  });
+}
+
+function csvEscape(v) {
+  if (v === null || v === undefined) return "";
+  const s = typeof v === "string" ? v : JSON.stringify(v);
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+async function routeExportCsv(sql, url) {
+  const table = (url.searchParams.get("table") || "specimens").toLowerCase();
+  let rows, headers;
+  if (table === "publications") {
+    rows = await sql`SELECT id, title, authors, year, journal, publication_date, open_access_url, verification_state FROM publications ORDER BY year DESC, id`;
+    headers = ["id", "title", "authors", "year", "journal", "publication_date", "open_access_url", "verification_state"];
+  } else if (table === "specimens") {
+    rows = await sql`SELECT id, common_name, catalog_number, site_id, taxonomic_assignment, assignment_method, assignment_publication, verification_state FROM specimens ORDER BY id`;
+    headers = ["id", "common_name", "catalog_number", "site_id", "taxonomic_assignment", "assignment_method", "assignment_publication", "verification_state"];
+  } else if (table === "analyses") {
+    rows = await sql`SELECT id, specimen_id, publication_id, method, dating_method, age_estimate_lower_ka, age_estimate_upper_ka, verification_state FROM analyses ORDER BY publication_id, specimen_id`;
+    headers = ["id", "specimen_id", "publication_id", "method", "dating_method", "age_estimate_lower_ka", "age_estimate_upper_ka", "verification_state"];
+  } else if (table === "comparisons") {
+    rows = await sql`SELECT id, specimen_a_id, specimen_b_id, comparison_type, method, publication_id, verification_state FROM specimen_comparisons ORDER BY id`;
+    headers = ["id", "specimen_a_id", "specimen_b_id", "comparison_type", "method", "publication_id", "verification_state"];
+  } else {
+    return json({ error: "bad_request", message: "table must be one of: publications, specimens, analyses, comparisons", provided: table }, { status: 400 });
+  }
+  const lines = [headers.join(",")];
+  for (const r of rows) lines.push(headers.map(h => csvEscape(r[h])).join(","));
+  const body = lines.join("\n") + "\n";
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "content-type": "text/csv; charset=utf-8",
+      "content-disposition": `attachment; filename="sar_${table}.csv"`,
+      "x-sar-version": VERSION,
+      "x-sar-row-count": String(rows.length),
+      "cache-control": "public, max-age=60",
+    },
+  });
+}
+
+async function routeRelated(sql, specimenId) {
+  const [spec] = await sql`SELECT id, common_name, taxonomic_assignment, site_id FROM specimens WHERE id = ${specimenId}`;
+  if (!spec) return json({ error: "not_found", specimen_id: specimenId }, { status: 404 });
+
+  // Neighbors via shared analyses (same publication)
+  const viaShared = await sql`
+    SELECT DISTINCT sp2.id, sp2.common_name, sp2.taxonomic_assignment, sp2.site_id,
+           ARRAY_AGG(DISTINCT a2.publication_id ORDER BY a2.publication_id) AS shared_publications
+    FROM analyses a1
+    JOIN analyses a2 ON a2.publication_id = a1.publication_id AND a2.specimen_id <> a1.specimen_id
+    JOIN specimens sp2 ON sp2.id = a2.specimen_id
+    WHERE a1.specimen_id = ${specimenId}
+    GROUP BY sp2.id, sp2.common_name, sp2.taxonomic_assignment, sp2.site_id
+    ORDER BY sp2.id
+  `;
+
+  // Neighbors via same site
+  const viaSite = await sql`
+    SELECT sp.id, sp.common_name, sp.taxonomic_assignment, sp.site_id
+    FROM specimens sp
+    WHERE sp.site_id = ${spec.site_id} AND sp.id <> ${specimenId}
+    ORDER BY sp.id
+  `;
+
+  // Neighbors via specimen_comparisons
+  const viaComparisons = await sql`
+    SELECT DISTINCT sp.id, sp.common_name, sp.taxonomic_assignment, sp.site_id,
+           ARRAY_AGG(DISTINCT sc.comparison_type ORDER BY sc.comparison_type) AS comparison_types,
+           ARRAY_AGG(DISTINCT sc.publication_id ORDER BY sc.publication_id) AS via_publications
+    FROM specimen_comparisons sc
+    JOIN specimens sp ON sp.id = CASE WHEN sc.specimen_a_id = ${specimenId} THEN sc.specimen_b_id ELSE sc.specimen_a_id END
+    WHERE sc.specimen_a_id = ${specimenId} OR sc.specimen_b_id = ${specimenId}
+    GROUP BY sp.id, sp.common_name, sp.taxonomic_assignment, sp.site_id
+    ORDER BY sp.id
+  `;
+
+  return json({
+    version: VERSION,
+    specimen: spec,
+    related: {
+      via_shared_publication: viaShared,
+      via_same_site: viaSite,
+      via_comparison: viaComparisons,
+    },
+    counts: {
+      via_shared_publication: viaShared.length,
+      via_same_site: viaSite.length,
+      via_comparison: viaComparisons.length,
+    },
+    note: "Three relatedness surfaces: (a) specimens co-analysed in the same publication, (b) other specimens from the same site, (c) specimens linked via a specimen_comparisons row. A single specimen can appear in multiple surfaces.",
   });
 }
 
@@ -950,7 +1045,7 @@ export default {
         build_date: BUILD_DATE,
         stage: "pilot-corpus",
         backing_store: "neon-postgres",
-        capabilities: ["pagination", "fts-search", "html-browser", "comparisons", "provenance-graph", "license", "rate-limit", "access-log", "stats", "timeline", "audit", "openapi", "methods"],
+        capabilities: ["pagination", "fts-search", "html-browser", "comparisons", "provenance-graph", "license", "rate-limit", "access-log", "stats", "timeline", "audit", "openapi", "methods", "related", "export-csv"],
       }, { rate_remaining: rate.remaining });
     }
     if (path === "/license") return routeLicense(acceptsHtml);
@@ -977,17 +1072,20 @@ export default {
       else if (path === "/timeline") response = await routeTimeline(sql, acceptsHtml);
       else if (path === "/audit") response = await routeAudit(sql, url);
       else if (path === "/methods") response = await routeMethods(sql);
+      else if (path === "/export.csv" || path === "/export") response = await routeExportCsv(sql, url);
       else if (path === "/openapi" || path === "/openapi.json") response = routeOpenAPI();
       else {
         const specM = path.match(/^\/specimens\/([^/]+)$/);
         const siteM = path.match(/^\/sites\/([^/]+)$/);
         const pubM = path.match(/^\/publications\/([^/]+)$/);
         const graphM = path.match(/^\/graph\/([^/]+)$/);
+        const relM = path.match(/^\/related\/([^/]+)$/);
         const legacyM = path.match(/^\/corpus\/([^/]+)$/);
         if (specM) response = await routeSpecimenById(sql, decodeURIComponent(specM[1]), acceptsHtml);
         else if (siteM) response = await routeSiteById(sql, decodeURIComponent(siteM[1]), acceptsHtml);
         else if (pubM) response = await routePublicationById(sql, decodeURIComponent(pubM[1]), acceptsHtml);
         else if (graphM) response = await routeGraph(sql, decodeURIComponent(graphM[1]));
+        else if (relM) response = await routeRelated(sql, decodeURIComponent(relM[1]));
         else if (legacyM) response = await routePublicationById(sql, decodeURIComponent(legacyM[1]), acceptsHtml);
         else response = json({ error: "not_found", path }, { status: 404 });
       }
