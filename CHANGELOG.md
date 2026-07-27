@@ -15,6 +15,31 @@ string.
 
 ---
 
+## [0.0.12-neon] — 2026-07-27 (block #9)
+
+### Added
+- **`/timeline` HTML: decade-density histogram** rendered above the existing full table. Shows specimen counts bucketed by decade of earliest describing publication with inline bar chart. Zero-count decades kept in the axis so runs of no-publication years are visible.
+- **`/stats` HTML: SVG line chart of publications-per-year** with axis labels, min/max Y ticks, hover-tooltip dots for each year, and gray-dot infill for zero-count intermediate years so a viewer can see the year-over-year cadence at a glance. The prior `Publications by year` table is retained below.
+- **`/random` endpoint** for random specimen draws. HTML mode 302-redirects to `/specimens/:id`. JSON mode returns the specimen row with a `redirect_html` field so JSON clients can follow the same target. Added to nav, sitemap, and OpenAPI spec.
+- **T5.7 Pinhasi 2011** (PMID 21555570, DOI 10.1073/pnas.1018938108) — ultrafiltered AMS 14C redating of the late Mezmaiskaya Neanderthal, direct date 39,700 ± 1,100 14C BP (~39 ka cal BP). Resolves the ~29 ka claim in Ovchinnikov 2000 (T5.3). New analysis row for `mezmaiskaya-2` (specimen row already existed from prior inline-sites migration).
+- **T5.8 Fu 2014** (PMID 25341783, DOI 10.1038/nature13810) — Ust'-Ishim 45 ka modern-human whole genome. Dates the Neanderthal → modern-human gene flow to 7–13 kyr before ust-ishim-1 lived (~50–60 ka) via recombination decay on the long introgressed tracts. Adds specimen `ust-ishim-1` + site `ust-ishim-locality`. Adds `contemporaneous` comparison row ust-ishim-1 ↔ oase-1.
+
+### Capability list
+20 capabilities total (was 17): `pagination`, `fts-search`, `html-browser`, `comparisons`, `provenance-graph`, `license`, `rate-limit`, `access-log`, `stats`, `timeline`, `audit`, `openapi`, `methods`, `related`, `export-csv`, `sitemap-xml`, `year-filter`, `timeline-visual`, `stats-chart`, `random`.
+
+### Corpus state at end of block #9
+- **30 publications** (was 28)
+- **32 specimens** (was 31)
+- **15 sites** (unchanged)
+- **33 analyses** (was 31)
+- **37 comparisons** (was 36)
+
+### Notes
+- Both new ingests are DRAFT `pending-verification` per standing rules. Only Michael can promote to `source-locked`.
+- The Ovchinnikov 2000 dating discrepancy (T5.3 flagged ~29 ka) is now formally reconciled in the corpus via the Pinhasi 2011 analysis row on `mezmaiskaya-2`. The original `mezmaiskaya-1` analysis row still shows the ~29 ka value it reported at publication; a `verification_notes` update on that older row is a candidate for the next block.
+
+---
+
 ## [0.0.11-neon] — 2026-07-27 (block #8)
 
 ### Added
