@@ -8,8 +8,8 @@
 
 import { neon } from "@neondatabase/serverless";
 
-const VERSION = "0.0.11-neon";
-const BUILD_DATE = "2026-07-26";
+const VERSION = "0.0.12-neon";
+const BUILD_DATE = "2026-07-27";
 const CITATION = "Specimen Registry v0.0.7 (2026). Maintained by Michael Gonzalez with AI assistance. https://specimenregistry.org. Data licensed under CC BY 4.0.";
 const LICENSE_URL = "https://specimenregistry.org/license";
 const SOURCE_URL = "https://github.com/mpgonzalez271/specimen-registry";
@@ -106,6 +106,7 @@ function layout({ title, body, active }) {
     ["/comparisons", "Comparisons"],
     ["/stats", "Stats"],
     ["/timeline", "Timeline"],
+    ["/random", "Random"],
     ["/search?q=Denisovan", "Search"],
     ["/license", "License"],
   ].map(([href, label]) => {
@@ -531,6 +532,7 @@ function routeOpenAPI() {
       "/license": { get: { summary: "CC BY 4.0 attribution disclosure", responses: { "200": { description: "license JSON or HTML" } } } },
       "/stats": { get: { summary: "Corpus rollups: totals + specimens by state/site + pubs by year", responses: { "200": { description: "stats JSON" } } } },
       "/timeline": { get: { summary: "Specimens with their earliest describing publication, ordered by publication year", responses: { "200": { description: "timeline JSON" } } } },
+      "/random": { get: { summary: "Random specimen. HTML mode 302-redirects to /specimens/:id; JSON mode returns the specimen row.", responses: { "200": { description: "random specimen JSON" }, "302": { description: "redirect to specimen detail" } } } },
       "/audit": { get: { summary: "Recent access log entries (last N=20 default, max 100). Only public routes; IPs are one-way hashed.", parameters: [{ name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 20 } }], responses: { "200": { description: "audit JSON" } } } },
       "/methods": { get: { summary: "Distinct assignment methods (how specimens were taxonomically assigned) and analysis types (techniques applied in individual papers), with counts.", responses: { "200": { description: "methods JSON" } } } },
       "/related/{id}": { get: { summary: "Neighbor specimens across three relatedness surfaces: shared publication, same site, and specimen_comparisons row.", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "related JSON" }, "404": { description: "specimen not found" } } } },
@@ -587,12 +589,72 @@ async function routeTimeline(sql, wantsHtml) {
       <td>${pubs || "—"}</td>
     </tr>`;
   }).join("");
+  // Build a decade-density histogram for the visual chart above the table.
+  const validYears = rows.map(r => r.earliest_year).filter(y => y != null);
+  const nullCount = rows.length - validYears.length;
+  let densityHtml = "";
+  if (validYears.length > 0) {
+    const minY = Math.min(...validYears);
+    const maxY = Math.max(...validYears);
+    const minDecade = Math.floor(minY / 10) * 10;
+    const maxDecade = Math.floor(maxY / 10) * 10;
+    const buckets = {};
+    for (let d = minDecade; d <= maxDecade; d += 10) buckets[d] = 0;
+    for (const y of validYears) buckets[Math.floor(y / 10) * 10]++;
+    const maxBucket = Math.max(...Object.values(buckets), 1);
+    const bars = Object.entries(buckets).map(([dec, n]) => {
+      const pct = Math.round((n / maxBucket) * 100);
+      return `<div style="display:flex;align-items:center;gap:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:18px">
+        <span style="width:56px;color:#666">${dec}s</span>
+        <span style="flex:1;background:#eee;height:14px;border-radius:2px;overflow:hidden">
+          <span style="display:block;width:${pct}%;height:100%;background:${n === 0 ? 'transparent' : '#4a7dbf'}"></span>
+        </span>
+        <span style="width:32px;text-align:right;color:${n === 0 ? '#bbb' : '#333'}">${n}</span>
+      </div>`;
+    }).join("");
+    densityHtml = `<h2>Specimens by publication decade</h2>
+<p class="muted" style="font-size:13px">Decade-bucketed count of the earliest describing publication for each specimen. ${validYears.length} specimens with a linked publication year; ${nullCount} without.</p>
+<div style="max-width:640px;margin:8px 0 20px">${bars}</div>`;
+  }
   const body = `<h1>Timeline</h1>
 <p>${rows.length} specimens ordered by earliest describing publication year. Specimens with no analysis link are last.</p>
+${densityHtml}
+<h2>Full table</h2>
 <table><thead><tr><th>Year</th><th>Specimen</th><th>Common name</th><th>Taxon</th><th>Site</th><th>Publications</th></tr></thead>
 <tbody>${trs}</tbody></table>
 <p><a href="/timeline" onclick="event.preventDefault();fetch('/timeline',{headers:{accept:'application/json'}}).then(r=>r.json()).then(d=>alert(JSON.stringify(d,null,2)))">View as JSON</a> · <a href="/openapi">API spec</a></p>`;
   return html(layout({ title: "Timeline · SAR", body, active: "/timeline" }));
+}
+
+async function routeRandom(sql, wantsHtml) {
+  const rows = await sql`
+    SELECT sp.id AS specimen_id, sp.common_name, sp.taxonomic_assignment, sp.site_id, s.name AS site_name
+    FROM specimens sp
+    LEFT JOIN sites s ON s.id = sp.site_id
+    ORDER BY random()
+    LIMIT 1
+  `;
+  if (rows.length === 0) {
+    if (!wantsHtml) return json({ error: "empty corpus" }, { status: 404 });
+    return html(layout({ title: "Random · SAR", body: "<h1>Empty corpus</h1>", active: "/" }), { status: 404 });
+  }
+  const r = rows[0];
+  if (!wantsHtml) {
+    return json({
+      specimen_id: r.specimen_id,
+      common_name: r.common_name,
+      taxonomic_assignment: r.taxonomic_assignment,
+      site_id: r.site_id,
+      site_name: r.site_name,
+      redirect_html: `/specimens/${encodeURIComponent(r.specimen_id)}`,
+      note: "A random specimen from the corpus. Refresh /random to draw another.",
+    });
+  }
+  // HTML mode: redirect to the specimen detail page
+  return new Response(null, {
+    status: 302,
+    headers: { location: `/specimens/${encodeURIComponent(r.specimen_id)}` },
+  });
 }
 
 async function routeAudit(sql, url, wantsHtml) {
@@ -818,6 +880,43 @@ async function routeStats(sql, wantsHtml) {
   const stateRows = byState.map((r) => `<tr><td>${escapeHtml(r.verification_state)}</td><td style="text-align:right">${r.c}</td></tr>`).join("");
   const siteRows = bySite.map((r) => `<tr><td><a href="/sites/${encodeURIComponent(r.site_id)}">${escapeHtml(r.site_name || r.site_id)}</a></td><td style="text-align:right">${r.specimen_count}</td></tr>`).join("");
   const yearRows = byYear.map((r) => `<tr><td>${r.year}</td><td style="text-align:right">${r.c}</td></tr>`).join("");
+  // SVG line chart for publications by year — fill zero-count years between min and max
+  let yearChart = "";
+  if (byYear.length >= 2) {
+    const minYear = byYear[0].year;
+    const maxYear = byYear[byYear.length - 1].year;
+    const yearMap = new Map(byYear.map(r => [r.year, r.c]));
+    const filled = [];
+    for (let y = minYear; y <= maxYear; y++) filled.push({ year: y, c: yearMap.get(y) || 0 });
+    const maxC = Math.max(...filled.map(r => r.c), 1);
+    const w = 700, h = 220, padL = 40, padR = 10, padT = 20, padB = 30;
+    const cw = w - padL - padR, ch = h - padT - padB;
+    const xStep = filled.length > 1 ? cw / (filled.length - 1) : 0;
+    const points = filled.map((r, i) => {
+      const x = padL + i * xStep;
+      const y = padT + ch - (r.c / maxC) * ch;
+      return { x, y, year: r.year, c: r.c };
+    });
+    const polyline = points.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+    const dots = points.map(p => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${p.c > 0 ? 3 : 1.5}" fill="${p.c > 0 ? '#4a7dbf' : '#ccc'}"><title>${p.year}: ${p.c}</title></circle>`).join("");
+    // X-axis year labels at every ~5-year step
+    const step = Math.max(1, Math.ceil(filled.length / 10));
+    const xLabels = filled.map((r, i) => i % step === 0 ? `<text x="${(padL + i * xStep).toFixed(1)}" y="${h - padB + 14}" font-size="10" text-anchor="middle" fill="#666">${r.year}</text>` : "").join("");
+    // Y-axis: 0 and max
+    const yAxis = `<text x="${padL - 6}" y="${padT + 4}" font-size="10" text-anchor="end" fill="#666">${maxC}</text>
+      <text x="${padL - 6}" y="${padT + ch + 4}" font-size="10" text-anchor="end" fill="#666">0</text>`;
+    const axes = `<line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + ch}" stroke="#ccc"/>
+      <line x1="${padL}" y1="${padT + ch}" x2="${padL + cw}" y2="${padT + ch}" stroke="#ccc"/>`;
+    yearChart = `<h2>Publications-per-year chart</h2>
+<p class="muted" style="font-size:13px">Line chart of publications grouped by publication year, ${minYear}–${maxYear}. Hover a dot for the exact count.</p>
+<svg viewBox="0 0 ${w} ${h}" width="100%" style="max-width:${w}px;background:#fafafa;border:1px solid #eee;border-radius:3px">
+${axes}
+${yAxis}
+<polyline points="${polyline}" fill="none" stroke="#4a7dbf" stroke-width="1.5"/>
+${dots}
+${xLabels}
+</svg>`;
+  }
   const body = `<h1>Corpus stats</h1>
 <h2>Totals</h2>
 <table><tbody>
@@ -832,7 +931,8 @@ async function routeStats(sql, wantsHtml) {
 <p><small>No specimen is <code>source-locked</code> yet — that requires Michael's per-paper primary-source review.</small></p>
 <h2>Specimens by site</h2>
 <table><thead><tr><th>Site</th><th>Count</th></tr></thead><tbody>${siteRows}</tbody></table>
-<h2>Publications by year</h2>
+${yearChart}
+<h2>Publications by year (table)</h2>
 <table><thead><tr><th>Year</th><th>Count</th></tr></thead><tbody>${yearRows}</tbody></table>
 <p><a href="/openapi">API spec</a> · <a href="/timeline">Timeline view</a></p>`;
   return html(layout({ title: "Stats · SAR", body, active: "/stats" }));
@@ -1124,19 +1224,19 @@ export default {
         build_date: BUILD_DATE,
         stage: "pilot-corpus",
         backing_store: "neon-postgres",
-        capabilities: ["pagination", "fts-search", "html-browser", "comparisons", "provenance-graph", "license", "rate-limit", "access-log", "stats", "timeline", "audit", "openapi", "methods", "related", "export-csv", "sitemap-xml", "year-filter"],
+        capabilities: ["pagination", "fts-search", "html-browser", "comparisons", "provenance-graph", "license", "rate-limit", "access-log", "stats", "timeline", "audit", "openapi", "methods", "related", "export-csv", "sitemap-xml", "year-filter", "timeline-visual", "stats-chart", "random"],
       }, { rate_remaining: rate.remaining });
     }
     if (path === "/license") return routeLicense(acceptsHtml);
     if (path === "/robots.txt") return text("User-agent: *\nAllow: /\nSitemap: https://specimenregistry.org/sitemap.xml\nSitemap: https://specimenregistry.org/sitemap.txt\n");
     if (path === "/sitemap.txt") {
-      const paths = ["/", "/publications", "/specimens", "/sites", "/analyses", "/comparisons", "/search", "/license", "/version", "/stats", "/timeline", "/audit", "/openapi", "/methods"];
+      const paths = ["/", "/publications", "/specimens", "/sites", "/analyses", "/comparisons", "/search", "/license", "/version", "/stats", "/timeline", "/random", "/audit", "/openapi", "/methods"];
       return text(paths.map((p) => `https://specimenregistry.org${p}`).join("\n") + "\n");
     }
     if (path === "/sitemap.xml") {
       if (!env.DATABASE_URL) return json({ error: "DATABASE_URL not configured" }, { status: 500 });
       const sqlLocal = neon(env.DATABASE_URL);
-      const staticPaths = ["/", "/publications", "/specimens", "/sites", "/analyses", "/comparisons", "/search", "/license", "/version", "/stats", "/timeline", "/audit", "/openapi", "/methods"];
+      const staticPaths = ["/", "/publications", "/specimens", "/sites", "/analyses", "/comparisons", "/search", "/license", "/version", "/stats", "/timeline", "/random", "/audit", "/openapi", "/methods"];
       const specRows = await sqlLocal`SELECT id FROM specimens ORDER BY id`;
       const siteRows = await sqlLocal`SELECT id FROM sites ORDER BY id`;
       const pubRows = await sqlLocal`SELECT id FROM publications ORDER BY id`;
@@ -1165,6 +1265,7 @@ export default {
       else if (path === "/comparisons") response = await routeComparisons(sql, url, acceptsHtml);
       else if (path === "/stats") response = await routeStats(sql, acceptsHtml);
       else if (path === "/timeline") response = await routeTimeline(sql, acceptsHtml);
+      else if (path === "/random") response = await routeRandom(sql, acceptsHtml);
       else if (path === "/audit") response = await routeAudit(sql, url, acceptsHtml);
       else if (path === "/methods") response = await routeMethods(sql, acceptsHtml);
       else if (path === "/export.csv" || path === "/export") response = await routeExportCsv(sql, url);
