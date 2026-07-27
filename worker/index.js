@@ -583,14 +583,14 @@ async function routeMethods(sql) {
     ORDER BY specimen_count DESC, assignment_method
   `;
   const analysisTypes = await sql`
-    SELECT analysis_type AS method,
+    SELECT method AS method,
            COUNT(*)::int AS analysis_count,
            COUNT(DISTINCT specimen_id)::int AS specimen_count,
            COUNT(DISTINCT publication_id)::int AS publication_count
     FROM analyses
-    WHERE analysis_type IS NOT NULL
-    GROUP BY analysis_type
-    ORDER BY analysis_count DESC, analysis_type
+    WHERE method IS NOT NULL
+    GROUP BY method
+    ORDER BY analysis_count DESC, method
   `;
   return json({
     version: VERSION,
