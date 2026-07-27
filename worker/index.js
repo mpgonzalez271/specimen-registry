@@ -8,7 +8,7 @@
 
 import { neon } from "@neondatabase/serverless";
 
-const VERSION = "0.0.10-neon";
+const VERSION = "0.0.11-neon";
 const BUILD_DATE = "2026-07-26";
 const CITATION = "Specimen Registry v0.0.7 (2026). Maintained by Michael Gonzalez with AI assistance. https://specimenregistry.org. Data licensed under CC BY 4.0.";
 const LICENSE_URL = "https://specimenregistry.org/license";
@@ -247,7 +247,7 @@ async function routeCorpus(sql) {
   });
 }
 
-async function routeSpecimens(sql, url) {
+async function routeSpecimens(sql, url, wantsHtml) {
   const site_id = url.searchParams.get("site_id");
   const { limit, offset } = parsePaging(url);
   const total = site_id
@@ -265,7 +265,17 @@ async function routeSpecimens(sql, url) {
                s.assignment_publication, s.verification_state,
                (SELECT COUNT(*)::int FROM analyses a WHERE a.specimen_id = s.id) AS analysis_count
         FROM specimens s ORDER BY s.id LIMIT ${limit} OFFSET ${offset}`;
-  return json({ version: VERSION, filter: site_id ? { site_id } : null, ...pageMeta(limit, offset, rows.length, total), specimens: rows });
+  if (!wantsHtml) return json({ version: VERSION, filter: site_id ? { site_id } : null, ...pageMeta(limit, offset, rows.length, total), specimens: rows });
+  const body = `
+    <h1>Specimens${site_id ? ` at <code>${escapeHtml(site_id)}</code>` : ""}</h1>
+    <p class="muted">${total} total · showing ${rows.length} (offset ${offset}, limit ${limit})</p>
+    <table>
+      <thead><tr><th>ID</th><th>Common name</th><th>Site</th><th>Taxon</th><th>Method</th><th>Analyses</th><th>State</th></tr></thead>
+      <tbody>${rows.map(r => `<tr><td><a href="/specimens/${encodeURIComponent(r.id)}">${escapeHtml(r.id)}</a></td><td>${escapeHtml(r.common_name || "")}</td><td><a href="/sites/${encodeURIComponent(r.site_id || "")}">${escapeHtml(r.site_id || "")}</a></td><td>${escapeHtml(r.taxonomic_assignment || "")}</td><td>${escapeHtml(r.assignment_method || "")}</td><td>${r.analysis_count}</td><td><span class="chip chip-${escapeHtml(r.verification_state)}">${escapeHtml(r.verification_state)}</span></td></tr>`).join("")}</tbody>
+    </table>
+    <p class="muted"><a href="/specimens?limit=${limit}&offset=${Math.max(0, offset - limit)}">&larr; prev</a> · <a href="/specimens?limit=${limit}&offset=${offset + limit}">next &rarr;</a> · <a href="/export.csv?table=specimens">download CSV</a></p>
+  `;
+  return html(layout({ title: "Specimens", body, active: "/specimens" }));
 }
 
 async function routeSpecimenById(sql, id, wantsHtml) {
@@ -389,16 +399,44 @@ ${specimens.length ? `<table><thead><tr><th>Specimen</th><th>Taxonomic assignmen
   return html(layout({ title: site.name, body, active: "/sites" }));
 }
 
-async function routePublications(sql, url) {
+async function routePublications(sql, url, wantsHtml) {
+  const yearFilter = parseInt(url.searchParams.get("year") || "", 10);
+  const yearMin = parseInt(url.searchParams.get("year_min") || "", 10);
+  const yearMax = parseInt(url.searchParams.get("year_max") || "", 10);
+  const useYear = !isNaN(yearFilter);
+  const useRange = !isNaN(yearMin) || !isNaN(yearMax);
   const { limit, offset } = parsePaging(url);
-  const total = (await sql`SELECT COUNT(*)::int AS n FROM publications`)[0].n;
-  const rows = await sql`
+  let total, rows;
+  if (useYear) {
+    total = (await sql`SELECT COUNT(*)::int AS n FROM publications WHERE year = ${yearFilter}`)[0].n;
+    rows = await sql`SELECT id, title, authors, year, journal, verification_state FROM publications WHERE year = ${yearFilter} ORDER BY year DESC, id LIMIT ${limit} OFFSET ${offset}`;
+  } else if (useRange) {
+    const lo = isNaN(yearMin) ? 1900 : yearMin;
+    const hi = isNaN(yearMax) ? 2100 : yearMax;
+    total = (await sql`SELECT COUNT(*)::int AS n FROM publications WHERE year >= ${lo} AND year <= ${hi}`)[0].n;
+    rows = await sql`SELECT id, title, authors, year, journal, verification_state FROM publications WHERE year >= ${lo} AND year <= ${hi} ORDER BY year DESC, id LIMIT ${limit} OFFSET ${offset}`;
+  } else {
+    total = (await sql`SELECT COUNT(*)::int AS n FROM publications`)[0].n;
+    rows = await sql`
     SELECT id, title, year, journal, authors, verification_state,
            (SELECT COUNT(*)::int FROM analyses a WHERE a.publication_id = p.id) AS analysis_count,
            (SELECT COUNT(*)::int FROM specimens s WHERE s.assignment_publication = p.id OR s.provenance_publication = p.id) AS specimen_count
     FROM publications p ORDER BY year DESC, id LIMIT ${limit} OFFSET ${offset}
   `;
-  return json({ version: VERSION, ...pageMeta(limit, offset, rows.length, total), publications: rows });
+  }
+  const filter = useYear ? { year: yearFilter } : useRange ? { year_min: isNaN(yearMin) ? null : yearMin, year_max: isNaN(yearMax) ? null : yearMax } : null;
+  if (!wantsHtml) return json({ version: VERSION, filter, ...pageMeta(limit, offset, rows.length, total), publications: rows });
+  const filterLabel = useYear ? ` in ${yearFilter}` : useRange ? ` (${isNaN(yearMin) ? "≤" : yearMin + "–"}${isNaN(yearMax) ? "today" : yearMax})` : "";
+  const body = `
+    <h1>Publications${filterLabel}</h1>
+    <p class="muted">${total} total · showing ${rows.length} (offset ${offset}, limit ${limit}) · filter by <a href="/publications?year=1997">?year=YYYY</a> or <a href="/publications?year_min=2018&year_max=2020">?year_min=YYYY&amp;year_max=YYYY</a></p>
+    <table>
+      <thead><tr><th>DOI</th><th>Title</th><th>Year</th><th>Journal</th><th>State</th></tr></thead>
+      <tbody>${rows.map(r => `<tr><td><a href="/publications/${encodeURIComponent(r.id)}">${escapeHtml(r.id)}</a></td><td>${escapeHtml((r.title || "").slice(0, 100))}</td><td>${r.year || ""}</td><td>${escapeHtml(r.journal || "")}</td><td><span class="chip chip-${escapeHtml(r.verification_state)}">${escapeHtml(r.verification_state)}</span></td></tr>`).join("")}</tbody>
+    </table>
+    <p class="muted"><a href="/publications?limit=${limit}&offset=${Math.max(0, offset - limit)}${useYear ? "&year=" + yearFilter : ""}">&larr; prev</a> · <a href="/publications?limit=${limit}&offset=${offset + limit}${useYear ? "&year=" + yearFilter : ""}">next &rarr;</a> · <a href="/export.csv?table=publications">download CSV</a></p>
+  `;
+  return html(layout({ title: "Publications", body, active: "/publications" }));
 }
 
 async function routePublicationById(sql, id, wantsHtml) {
@@ -1086,14 +1124,30 @@ export default {
         build_date: BUILD_DATE,
         stage: "pilot-corpus",
         backing_store: "neon-postgres",
-        capabilities: ["pagination", "fts-search", "html-browser", "comparisons", "provenance-graph", "license", "rate-limit", "access-log", "stats", "timeline", "audit", "openapi", "methods", "related", "export-csv"],
+        capabilities: ["pagination", "fts-search", "html-browser", "comparisons", "provenance-graph", "license", "rate-limit", "access-log", "stats", "timeline", "audit", "openapi", "methods", "related", "export-csv", "sitemap-xml", "year-filter"],
       }, { rate_remaining: rate.remaining });
     }
     if (path === "/license") return routeLicense(acceptsHtml);
-    if (path === "/robots.txt") return text("User-agent: *\nAllow: /\nSitemap: https://specimenregistry.org/sitemap.txt\n");
+    if (path === "/robots.txt") return text("User-agent: *\nAllow: /\nSitemap: https://specimenregistry.org/sitemap.xml\nSitemap: https://specimenregistry.org/sitemap.txt\n");
     if (path === "/sitemap.txt") {
       const paths = ["/", "/publications", "/specimens", "/sites", "/analyses", "/comparisons", "/search", "/license", "/version", "/stats", "/timeline", "/audit", "/openapi", "/methods"];
       return text(paths.map((p) => `https://specimenregistry.org${p}`).join("\n") + "\n");
+    }
+    if (path === "/sitemap.xml") {
+      if (!env.DATABASE_URL) return json({ error: "DATABASE_URL not configured" }, { status: 500 });
+      const sqlLocal = neon(env.DATABASE_URL);
+      const staticPaths = ["/", "/publications", "/specimens", "/sites", "/analyses", "/comparisons", "/search", "/license", "/version", "/stats", "/timeline", "/audit", "/openapi", "/methods"];
+      const specRows = await sqlLocal`SELECT id FROM specimens ORDER BY id`;
+      const siteRows = await sqlLocal`SELECT id FROM sites ORDER BY id`;
+      const pubRows = await sqlLocal`SELECT id FROM publications ORDER BY id`;
+      const urls = [
+        ...staticPaths.map(p => ({ loc: `https://specimenregistry.org${p}`, priority: p === "/" ? "1.0" : "0.8" })),
+        ...specRows.map(r => ({ loc: `https://specimenregistry.org/specimens/${encodeURIComponent(r.id)}`, priority: "0.7" })),
+        ...siteRows.map(r => ({ loc: `https://specimenregistry.org/sites/${encodeURIComponent(r.id)}`, priority: "0.6" })),
+        ...pubRows.map(r => ({ loc: `https://specimenregistry.org/publications/${encodeURIComponent(r.id)}`, priority: "0.6" })),
+      ];
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.map(u => `  <url><loc>${u.loc}</loc><priority>${u.priority}</priority></url>`).join("\n")}\n</urlset>\n`;
+      return new Response(xml, { status: 200, headers: { "content-type": "application/xml; charset=utf-8", ...CORS } });
     }
 
     if (!env.DATABASE_URL) return json({ error: "DATABASE_URL not configured" }, { status: 500 });
@@ -1104,9 +1158,9 @@ export default {
       if (path === "/") response = html(await renderHomepage(sql));
       else if (path === "/corpus") response = await routeCorpus(sql);
       else if (path === "/search") response = await routeSearch(sql, url, acceptsHtml);
-      else if (path === "/specimens") response = await routeSpecimens(sql, url);
+      else if (path === "/specimens") response = await routeSpecimens(sql, url, acceptsHtml);
       else if (path === "/sites") response = await routeSites(sql, url);
-      else if (path === "/publications") response = await routePublications(sql, url);
+      else if (path === "/publications") response = await routePublications(sql, url, acceptsHtml);
       else if (path === "/analyses") response = await routeAnalyses(sql, url);
       else if (path === "/comparisons") response = await routeComparisons(sql, url, acceptsHtml);
       else if (path === "/stats") response = await routeStats(sql, acceptsHtml);
