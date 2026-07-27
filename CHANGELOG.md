@@ -15,6 +15,31 @@ string.
 
 ---
 
+## [0.0.10-neon] — 2026-07-27 (block #7)
+
+### Added
+- HTML rendering for `/methods` and `/audit` (previously JSON-only). Both routes now render tables when `Accept: text/html` is requested; JSON contract unchanged for programmatic clients.
+- Two Tier-5 corpus entries:
+  - T5.3 Ovchinnikov 2000 (10.1038/35006625) — first-describing mtDNA paper for Mezmaiskaya 1; closes a comparator gap referenced by Hajdinjak 2018.
+  - T5.4 Prüfer 2014 (10.1038/nature12886) — originating publication for the Denisova 5 (Altai) high-coverage Neanderthal genome; previously present as a specimen but cross-referenced only.
+- New specimen: `mezmaiskaya-1` (Caucasus Neanderthal infant).
+- 5 retroactive `specimen_comparisons` rows linking the five late Neanderthals in Hajdinjak 2018 to Mezmaiskaya 1 for the population-turnover claim.
+- 2 new `analyses` rows for Prüfer 2014 (denisova-5 high-coverage + mezmaiskaya-1 low-coverage; the second is pending disambiguation from Mezmaiskaya 2).
+
+### Fixed
+- HTML `/methods` render bug: pg's `array_agg` returns a text-literal (`{a,b}`) not a JS array over the Neon serverless driver; added `parseArr()` helper.
+
+---
+
+## [0.0.9-neon] — 2026-07-27 (block #7)
+
+### Added
+- `/related/{id}` — neighbor specimens across three relatedness surfaces (shared publication, same site, `specimen_comparisons` row).
+- `/export.csv?table={publications|specimens|analyses|comparisons}` — bulk CSV export with `content-disposition: attachment` and `x-sar-row-count` header. Default: specimens.
+- OpenAPI spec entries for both new routes.
+
+---
+
 ## [0.0.8-neon] — 2026-07-27
 
 ### Added
@@ -31,12 +56,19 @@ string.
 - `/audit` query used non-existent `access_log.user_agent` column; corrected to `access_log.ua AS user_agent`.
 - `/methods` initial deploy queried non-existent `analyses.analysis_type`; corrected to `analyses.method`.
 
-### Corpus totals
+### Corpus totals (end of block #6)
 - Publications: **26**
 - Specimens: **29** (added `sidron-cr21`, `oase-2`)
 - Sites: **14** (added `el-sidron-cave`)
 - Analyses: **26**
 - Comparisons: **30** (up from 5)
+
+### Corpus totals (end of block #7)
+- Publications: **27** (added Ovchinnikov 2000, Prüfer 2014)
+- Specimens: **30** (added `mezmaiskaya-1`)
+- Sites: **14**
+- Analyses: **29** (added Ovchinnikov mtDNA + two Prüfer 2014 rows)
+- Comparisons: **35** (up from 30 with Mezmaiskaya 1 comparator rows)
 
 ---
 
