@@ -717,7 +717,12 @@ async function routeMethods(sql, wantsHtml) {
       note: "assignment_method reflects how a specimen was taxonomically assigned. analysis_type reflects the technique used in an individual paper's analysis. A single specimen typically has one assignment_method but multiple analyses across papers.",
     });
   }
-  const trsAssign = assignmentMethods.map(m => `<tr><td>${escapeHtml(m.method)}</td><td>${m.specimen_count}</td><td>${(m.verification_states || []).map(v => `<code>${escapeHtml(v)}</code>`).join(" ")}</td></tr>`).join("");
+  const parseArr = (v) => {
+    if (Array.isArray(v)) return v;
+    if (typeof v === "string" && v.startsWith("{") && v.endsWith("}")) return v.slice(1, -1).split(",").filter(Boolean);
+    return [];
+  };
+  const trsAssign = assignmentMethods.map(m => `<tr><td>${escapeHtml(m.method)}</td><td>${m.specimen_count}</td><td>${parseArr(m.verification_states).map(v => `<code>${escapeHtml(v)}</code>`).join(" ")}</td></tr>`).join("");
   const trsAnal = analysisTypes.map(m => `<tr><td>${escapeHtml(m.method)}</td><td>${m.analysis_count}</td><td>${m.specimen_count}</td><td>${m.publication_count}</td></tr>`).join("");
   const body = `<h1>Methods</h1>
 <p><b>assignment_method</b> = how a specimen was taxonomically assigned. <b>analysis type</b> = the technique used in an individual paper's analysis. A specimen typically has one assignment_method but appears in multiple analyses across papers.</p>
