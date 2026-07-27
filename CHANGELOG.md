@@ -15,6 +15,54 @@ string.
 
 ---
 
+## [0.0.8-neon] — 2026-07-27
+
+### Added
+- `/methods` endpoint listing distinct `specimens.assignment_method` and `analyses.method` values with counts.
+- HTML rendering for `/stats` and `/timeline` (previously JSON-only).
+- Two Tier-5 corpus entries:
+  - T5.1 Kuhlwilm 2016 (10.1038/nature16544) — early modern human → Altai Neanderthal gene flow ~100 kya.
+  - T5.2 Rougier 2007 (10.1073/pnas.0610538104) — Oase 2 cranial morphology (companion to Fu 2015).
+- 25 new `specimen_comparisons` rows auto-generated from Hajdinjak 2018 verbatim PubMed abstract, covering pairwise relatedness among the five late Neanderthals plus their relationships to Vindija 33.19, Denisova 5, and Oase 1.
+- Hajdinjak 2018 abstract promoted from `pending-verification` to source-locked (verified verbatim against PubMed PMID 29562232).
+
+### Fixed
+- `/openapi` route: `.json` extension was being stripped by the content-type normalizer causing `/openapi.json` to 404. Now handles both `/openapi` and `/openapi.json`.
+- `/audit` query used non-existent `access_log.user_agent` column; corrected to `access_log.ua AS user_agent`.
+- `/methods` initial deploy queried non-existent `analyses.analysis_type`; corrected to `analyses.method`.
+
+### Corpus totals
+- Publications: **26**
+- Specimens: **29** (added `sidron-cr21`, `oase-2`)
+- Sites: **14** (added `el-sidron-cave`)
+- Analyses: **26**
+- Comparisons: **30** (up from 5)
+
+---
+
+## [0.0.7-neon] — 2026-07-26
+
+### Added
+- `/timeline` — specimens ordered by earliest describing publication year.
+- `/audit` — recent access-log entries; IPs one-way hashed; limit 1–100 (default 20).
+- `/openapi` and `/openapi.json` — full OpenAPI 3.1 spec with all documented routes.
+- README.md refreshed with quickstart, endpoint index, contributing/disagreement policy, and repo layout.
+
+---
+
+## [0.0.6-neon] — 2026-07-26
+
+### Added
+- `/stats` endpoint (totals + specimens by verification state + specimens by site + publications by year).
+- Tier-3 and Tier-4 corpus entries:
+  - T3.1 Sawyer 2015 (Denisova 4 + Denisova 8).
+  - T3.2 Reich 2011 (Denisovan admixture population survey).
+  - T3.3 Sankararaman 2014 (Neanderthal-ancestry haplotype map).
+  - T4.1 Vernot & Akey 2014 (Neanderthal introgression map).
+  - T4.2 Seguin-Orlando 2014 (Kostenki 14 Upper Paleolithic modern-human genome). New site `kostenki-markina-gora`.
+
+---
+
 ## [0.0.5-neon] — 2026-07-26
 
 ### Added
