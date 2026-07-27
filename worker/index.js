@@ -8,7 +8,7 @@
 
 import { neon } from "@neondatabase/serverless";
 
-const VERSION = "0.0.7-neon";
+const VERSION = "0.0.8-neon";
 const BUILD_DATE = "2026-07-26";
 const CITATION = "Specimen Registry v0.0.7 (2026). Maintained by Michael Gonzalez with AI assistance. https://specimenregistry.org. Data licensed under CC BY 4.0.";
 const LICENSE_URL = "https://specimenregistry.org/license";
@@ -494,6 +494,7 @@ function routeOpenAPI() {
       "/stats": { get: { summary: "Corpus rollups: totals + specimens by state/site + pubs by year", responses: { "200": { description: "stats JSON" } } } },
       "/timeline": { get: { summary: "Specimens with their earliest describing publication, ordered by publication year", responses: { "200": { description: "timeline JSON" } } } },
       "/audit": { get: { summary: "Recent access log entries (last N=20 default, max 100). Only public routes; IPs are one-way hashed.", parameters: [{ name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 20 } }], responses: { "200": { description: "audit JSON" } } } },
+      "/methods": { get: { summary: "Distinct assignment methods (how specimens were taxonomically assigned) and analysis types (techniques applied in individual papers), with counts.", responses: { "200": { description: "methods JSON" } } } },
       "/publications": { get: { summary: "List publications (paginated)", parameters: [{ name: "limit", in: "query", schema: { type: "integer", default: 25, maximum: 100 } }, { name: "offset", in: "query", schema: { type: "integer", default: 0 } }], responses: { "200": { description: "publications JSON" } } } },
       "/publications/{doi}": { get: { summary: "Single publication by DOI", parameters: [{ name: "doi", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "publication JSON or HTML" } } } },
       "/specimens": { get: { summary: "List specimens (paginated)", parameters: [{ name: "limit", in: "query", schema: { type: "integer", default: 25, maximum: 100 } }, { name: "offset", in: "query", schema: { type: "integer", default: 0 } }, { name: "site_id", in: "query", schema: { type: "string" } }], responses: { "200": { description: "specimens JSON" } } } },
@@ -514,7 +515,7 @@ function routeOpenAPI() {
   return json(spec);
 }
 
-async function routeTimeline(sql) {
+async function routeTimeline(sql, wantsHtml) {
   const rows = await sql`
     SELECT sp.id AS specimen_id, sp.common_name, sp.taxonomic_assignment, sp.site_id,
            s.name AS site_name,
@@ -527,12 +528,31 @@ async function routeTimeline(sql) {
     GROUP BY sp.id, sp.common_name, sp.taxonomic_assignment, sp.site_id, s.name
     ORDER BY MIN(p.year) NULLS LAST, sp.id
   `;
-  return json({
-    version: VERSION,
-    count: rows.length,
-    timeline: rows,
-    note: "earliest_year = MIN(publication.year) of any analysis linking to the specimen. Specimens with no analysis link are ordered last (year=null).",
-  });
+  if (!wantsHtml) {
+    return json({
+      version: VERSION,
+      count: rows.length,
+      timeline: rows,
+      note: "earliest_year = MIN(publication.year) of any analysis linking to the specimen. Specimens with no analysis link are ordered last (year=null).",
+    });
+  }
+  const trs = rows.map((r) => {
+    const pubs = (r.publication_ids || []).map((p) => p ? `<a href="/publications/${encodeURIComponent(p)}">${escapeHtml(p)}</a>` : "").filter(Boolean).join("<br>");
+    return `<tr>
+      <td>${r.earliest_year ?? "—"}</td>
+      <td><a href="/specimens/${encodeURIComponent(r.specimen_id)}">${escapeHtml(r.specimen_id)}</a></td>
+      <td>${escapeHtml(r.common_name || "")}</td>
+      <td>${escapeHtml(r.taxonomic_assignment || "")}</td>
+      <td>${r.site_id ? `<a href="/sites/${encodeURIComponent(r.site_id)}">${escapeHtml(r.site_name || r.site_id)}</a>` : "—"}</td>
+      <td>${pubs || "—"}</td>
+    </tr>`;
+  }).join("");
+  const body = `<h1>Timeline</h1>
+<p>${rows.length} specimens ordered by earliest describing publication year. Specimens with no analysis link are last.</p>
+<table><thead><tr><th>Year</th><th>Specimen</th><th>Common name</th><th>Taxon</th><th>Site</th><th>Publications</th></tr></thead>
+<tbody>${trs}</tbody></table>
+<p><a href="/timeline" onclick="event.preventDefault();fetch('/timeline',{headers:{accept:'application/json'}}).then(r=>r.json()).then(d=>alert(JSON.stringify(d,null,2)))">View as JSON</a> · <a href="/openapi">API spec</a></p>`;
+  return html(layout({ title: "Timeline · SAR", body, active: "/timeline" }));
 }
 
 async function routeAudit(sql, url) {
@@ -552,7 +572,35 @@ async function routeAudit(sql, url) {
   });
 }
 
-async function routeStats(sql) {
+async function routeMethods(sql) {
+  const assignmentMethods = await sql`
+    SELECT assignment_method AS method,
+           COUNT(*)::int AS specimen_count,
+           ARRAY_AGG(DISTINCT verification_state ORDER BY verification_state) AS verification_states
+    FROM specimens
+    WHERE assignment_method IS NOT NULL
+    GROUP BY assignment_method
+    ORDER BY specimen_count DESC, assignment_method
+  `;
+  const analysisTypes = await sql`
+    SELECT analysis_type AS method,
+           COUNT(*)::int AS analysis_count,
+           COUNT(DISTINCT specimen_id)::int AS specimen_count,
+           COUNT(DISTINCT publication_id)::int AS publication_count
+    FROM analyses
+    WHERE analysis_type IS NOT NULL
+    GROUP BY analysis_type
+    ORDER BY analysis_count DESC, analysis_type
+  `;
+  return json({
+    version: VERSION,
+    assignment_methods: assignmentMethods,
+    analysis_types: analysisTypes,
+    note: "assignment_method reflects how a specimen was taxonomically assigned. analysis_type reflects the technique used in an individual paper's analysis. A single specimen typically has one assignment_method but multiple analyses across papers.",
+  });
+}
+
+async function routeStats(sql, wantsHtml) {
   const [pubs] = await sql`SELECT COUNT(*)::int AS c FROM publications`;
   const [specs] = await sql`SELECT COUNT(*)::int AS c FROM specimens`;
   const [sites] = await sql`SELECT COUNT(*)::int AS c FROM sites`;
@@ -578,19 +626,42 @@ async function routeStats(sql) {
     GROUP BY year
     ORDER BY year
   `;
-  return json({
-    totals: {
-      publications: pubs.c,
-      specimens: specs.c,
-      sites: sites.c,
-      analyses: anals.c,
-      comparisons: comps.c,
-    },
-    specimens_by_verification_state: byState,
-    specimens_by_site: bySite,
-    publications_by_year: byYear,
-    note: "All specimens in this pilot are in `draft` or `pending-verification` state until Michael Gonzalez signs off on primary-source review.",
-  });
+  if (!wantsHtml) {
+    return json({
+      totals: {
+        publications: pubs.c,
+        specimens: specs.c,
+        sites: sites.c,
+        analyses: anals.c,
+        comparisons: comps.c,
+      },
+      specimens_by_verification_state: byState,
+      specimens_by_site: bySite,
+      publications_by_year: byYear,
+      note: "All specimens in this pilot are in `draft` or `pending-verification` state until Michael Gonzalez signs off on primary-source review.",
+    });
+  }
+  const stateRows = byState.map((r) => `<tr><td>${escapeHtml(r.verification_state)}</td><td style="text-align:right">${r.c}</td></tr>`).join("");
+  const siteRows = bySite.map((r) => `<tr><td><a href="/sites/${encodeURIComponent(r.site_id)}">${escapeHtml(r.site_name || r.site_id)}</a></td><td style="text-align:right">${r.specimen_count}</td></tr>`).join("");
+  const yearRows = byYear.map((r) => `<tr><td>${r.year}</td><td style="text-align:right">${r.c}</td></tr>`).join("");
+  const body = `<h1>Corpus stats</h1>
+<h2>Totals</h2>
+<table><tbody>
+<tr><td>Publications</td><td style="text-align:right"><strong>${pubs.c}</strong></td></tr>
+<tr><td>Specimens</td><td style="text-align:right"><strong>${specs.c}</strong></td></tr>
+<tr><td>Sites</td><td style="text-align:right"><strong>${sites.c}</strong></td></tr>
+<tr><td>Analyses</td><td style="text-align:right"><strong>${anals.c}</strong></td></tr>
+<tr><td>Comparisons</td><td style="text-align:right"><strong>${comps.c}</strong></td></tr>
+</tbody></table>
+<h2>Specimens by verification state</h2>
+<table><thead><tr><th>State</th><th>Count</th></tr></thead><tbody>${stateRows}</tbody></table>
+<p><small>No specimen is <code>source-locked</code> yet — that requires Michael's per-paper primary-source review.</small></p>
+<h2>Specimens by site</h2>
+<table><thead><tr><th>Site</th><th>Count</th></tr></thead><tbody>${siteRows}</tbody></table>
+<h2>Publications by year</h2>
+<table><thead><tr><th>Year</th><th>Count</th></tr></thead><tbody>${yearRows}</tbody></table>
+<p><a href="/openapi">API spec</a> · <a href="/timeline">Timeline view</a></p>`;
+  return html(layout({ title: "Stats · SAR", body, active: "/stats" }));
 }
 
 async function routeComparisons(sql, url, wantsHtml) {
@@ -879,13 +950,13 @@ export default {
         build_date: BUILD_DATE,
         stage: "pilot-corpus",
         backing_store: "neon-postgres",
-        capabilities: ["pagination", "fts-search", "html-browser", "comparisons", "provenance-graph", "license", "rate-limit", "access-log", "stats", "timeline", "audit", "openapi"],
+        capabilities: ["pagination", "fts-search", "html-browser", "comparisons", "provenance-graph", "license", "rate-limit", "access-log", "stats", "timeline", "audit", "openapi", "methods"],
       }, { rate_remaining: rate.remaining });
     }
     if (path === "/license") return routeLicense(acceptsHtml);
     if (path === "/robots.txt") return text("User-agent: *\nAllow: /\nSitemap: https://specimenregistry.org/sitemap.txt\n");
     if (path === "/sitemap.txt") {
-      const paths = ["/", "/publications", "/specimens", "/sites", "/analyses", "/comparisons", "/search", "/license", "/version", "/stats", "/timeline", "/audit", "/openapi"];
+      const paths = ["/", "/publications", "/specimens", "/sites", "/analyses", "/comparisons", "/search", "/license", "/version", "/stats", "/timeline", "/audit", "/openapi", "/methods"];
       return text(paths.map((p) => `https://specimenregistry.org${p}`).join("\n") + "\n");
     }
 
@@ -902,9 +973,10 @@ export default {
       else if (path === "/publications") response = await routePublications(sql, url);
       else if (path === "/analyses") response = await routeAnalyses(sql, url);
       else if (path === "/comparisons") response = await routeComparisons(sql, url, acceptsHtml);
-      else if (path === "/stats") response = await routeStats(sql);
-      else if (path === "/timeline") response = await routeTimeline(sql);
+      else if (path === "/stats") response = await routeStats(sql, acceptsHtml);
+      else if (path === "/timeline") response = await routeTimeline(sql, acceptsHtml);
       else if (path === "/audit") response = await routeAudit(sql, url);
+      else if (path === "/methods") response = await routeMethods(sql);
       else if (path === "/openapi" || path === "/openapi.json") response = routeOpenAPI();
       else {
         const specM = path.match(/^\/specimens\/([^/]+)$/);
