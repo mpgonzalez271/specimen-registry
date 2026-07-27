@@ -15,6 +15,26 @@ string.
 
 ---
 
+## [0.0.11-neon] — 2026-07-27 (block #8)
+
+### Added
+- `/sitemap.xml` — proper XML sitemap enumerating static routes plus every specimen, site, and publication URL. `/robots.txt` updated to reference both `sitemap.xml` and `sitemap.txt`.
+- Year filter on `/publications` — `?year=YYYY` or `?year_min=YYYY&year_max=YYYY`.
+- HTML rendering for `/specimens` and `/publications` list views (previously JSON-only). Tables with verification-state chips, per-row links, and CSV download links.
+- Two Tier-5 corpus entries:
+  - T5.5 Krings 1997 (10.1016/s0092-8674(00)80310-4) — the *first ever* Neanderthal DNA sequence (Feldhofer type specimen). Adds `feldhofer-1` specimen + `feldhofer-cave` site.
+  - T5.6 Fu 2015 (10.1038/nature14558) — Oase 1 nuclear genome; the 6–9% Neanderthal ancestry / 4–6-generations-back finding.
+- New comparison row: Mezmaiskaya 1 ↔ Feldhofer 1 mtDNA (3.48% divergence claim from Ovchinnikov 2000). First-ever pairwise Neanderthal mtDNA comparison in the corpus.
+
+### Corpus totals (end of block #8)
+- Publications: **28** (added Krings 1997, Fu 2015)
+- Specimens: **31** (added `feldhofer-1`)
+- Sites: **15** (added `feldhofer-cave`)
+- Analyses: **31** (added Krings mtDNA + Fu 2015 nuclear)
+- Comparisons: **36** (up from 35)
+
+---
+
 ## [0.0.10-neon] — 2026-07-27 (block #7)
 
 ### Added
