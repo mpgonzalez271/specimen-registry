@@ -8,7 +8,7 @@
 
 import { neon } from "@neondatabase/serverless";
 
-const VERSION = "0.0.9-neon";
+const VERSION = "0.0.10-neon";
 const BUILD_DATE = "2026-07-26";
 const CITATION = "Specimen Registry v0.0.7 (2026). Maintained by Michael Gonzalez with AI assistance. https://specimenregistry.org. Data licensed under CC BY 4.0.";
 const LICENSE_URL = "https://specimenregistry.org/license";
@@ -557,7 +557,7 @@ async function routeTimeline(sql, wantsHtml) {
   return html(layout({ title: "Timeline · SAR", body, active: "/timeline" }));
 }
 
-async function routeAudit(sql, url) {
+async function routeAudit(sql, url, wantsHtml) {
   const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || 20), 1), 100);
   const rows = await sql`
     SELECT ts, method, path, status, duration_ms, ip_hash, ua AS user_agent, ray_id
@@ -565,13 +565,35 @@ async function routeAudit(sql, url) {
     ORDER BY ts DESC
     LIMIT ${limit}
   `;
-  return json({
-    version: VERSION,
-    count: rows.length,
-    limit,
-    audit: rows,
-    note: "IPs are one-way hashed with a rotating salt; no reverse lookup possible. User-Agent may be null for programmatic clients. This endpoint itself is included in the log.",
-  });
+  if (!wantsHtml) {
+    return json({
+      version: VERSION,
+      count: rows.length,
+      limit,
+      audit: rows,
+      note: "IPs are one-way hashed with a rotating salt; no reverse lookup possible. User-Agent may be null for programmatic clients. This endpoint itself is included in the log.",
+    });
+  }
+  const trs = rows.map((r) => {
+    const statusClass = r.status >= 500 ? "err" : r.status >= 400 ? "warn" : "ok";
+    return `<tr>
+      <td class="mono">${escapeHtml(String(r.ts))}</td>
+      <td>${escapeHtml(r.method || "")}</td>
+      <td class="mono"><a href="${escapeHtml(r.path || "")}">${escapeHtml(r.path || "")}</a></td>
+      <td class="${statusClass}">${r.status ?? ""}</td>
+      <td>${r.duration_ms ?? ""}ms</td>
+      <td class="mono" style="opacity:0.6">${escapeHtml((r.ip_hash || "").slice(0, 12))}${(r.ip_hash || "").length > 12 ? "…" : ""}</td>
+      <td>${escapeHtml((r.user_agent || "").slice(0, 60))}${(r.user_agent || "").length > 60 ? "…" : ""}</td>
+    </tr>`;
+  }).join("");
+  const body = `<h1>Access audit</h1>
+<p>Last ${rows.length} requests (limit=${limit}, max=100). IPs are one-way hashed with a rotating salt; no reverse lookup possible. User-Agent truncated to 60 chars for display.</p>
+<p><a href="/audit?limit=50">50</a> · <a href="/audit?limit=100">100</a></p>
+<style>.ok{color:#080}.warn{color:#c60}.err{color:#c00;font-weight:bold}.mono{font-family:ui-monospace,monospace;font-size:0.85em}</style>
+<table><thead><tr><th>Timestamp</th><th>Method</th><th>Path</th><th>Status</th><th>Duration</th><th>IP hash</th><th>User-Agent</th></tr></thead>
+<tbody>${trs}</tbody></table>
+<p><a href="/audit?limit=${limit}" onclick="event.preventDefault();fetch('/audit?limit=${limit}',{headers:{accept:'application/json'}}).then(r=>r.json()).then(d=>alert(JSON.stringify(d,null,2)))">View as JSON</a> · <a href="/openapi">API spec</a></p>`;
+  return html(layout({ title: "Audit · SAR", body, active: "/audit" }));
 }
 
 function csvEscape(v) {
@@ -667,7 +689,7 @@ async function routeRelated(sql, specimenId) {
   });
 }
 
-async function routeMethods(sql) {
+async function routeMethods(sql, wantsHtml) {
   const assignmentMethods = await sql`
     SELECT assignment_method AS method,
            COUNT(*)::int AS specimen_count,
@@ -687,12 +709,26 @@ async function routeMethods(sql) {
     GROUP BY method
     ORDER BY analysis_count DESC, method
   `;
-  return json({
-    version: VERSION,
-    assignment_methods: assignmentMethods,
-    analysis_types: analysisTypes,
-    note: "assignment_method reflects how a specimen was taxonomically assigned. analysis_type reflects the technique used in an individual paper's analysis. A single specimen typically has one assignment_method but multiple analyses across papers.",
-  });
+  if (!wantsHtml) {
+    return json({
+      version: VERSION,
+      assignment_methods: assignmentMethods,
+      analysis_types: analysisTypes,
+      note: "assignment_method reflects how a specimen was taxonomically assigned. analysis_type reflects the technique used in an individual paper's analysis. A single specimen typically has one assignment_method but multiple analyses across papers.",
+    });
+  }
+  const trsAssign = assignmentMethods.map(m => `<tr><td>${escapeHtml(m.method)}</td><td>${m.specimen_count}</td><td>${(m.verification_states || []).map(v => `<code>${escapeHtml(v)}</code>`).join(" ")}</td></tr>`).join("");
+  const trsAnal = analysisTypes.map(m => `<tr><td>${escapeHtml(m.method)}</td><td>${m.analysis_count}</td><td>${m.specimen_count}</td><td>${m.publication_count}</td></tr>`).join("");
+  const body = `<h1>Methods</h1>
+<p><b>assignment_method</b> = how a specimen was taxonomically assigned. <b>analysis type</b> = the technique used in an individual paper's analysis. A specimen typically has one assignment_method but appears in multiple analyses across papers.</p>
+<h2>Assignment methods (specimen-level)</h2>
+<table><thead><tr><th>Method</th><th># specimens</th><th>Verification states</th></tr></thead>
+<tbody>${trsAssign}</tbody></table>
+<h2>Analysis types (paper-level)</h2>
+<table><thead><tr><th>Method</th><th># analyses</th><th># specimens</th><th># publications</th></tr></thead>
+<tbody>${trsAnal}</tbody></table>
+<p><a href="/methods" onclick="event.preventDefault();fetch('/methods',{headers:{accept:'application/json'}}).then(r=>r.json()).then(d=>alert(JSON.stringify(d,null,2)))">View as JSON</a> · <a href="/openapi">API spec</a></p>`;
+  return html(layout({ title: "Methods · SAR", body, active: "/methods" }));
 }
 
 async function routeStats(sql, wantsHtml) {
@@ -1070,8 +1106,8 @@ export default {
       else if (path === "/comparisons") response = await routeComparisons(sql, url, acceptsHtml);
       else if (path === "/stats") response = await routeStats(sql, acceptsHtml);
       else if (path === "/timeline") response = await routeTimeline(sql, acceptsHtml);
-      else if (path === "/audit") response = await routeAudit(sql, url);
-      else if (path === "/methods") response = await routeMethods(sql);
+      else if (path === "/audit") response = await routeAudit(sql, url, acceptsHtml);
+      else if (path === "/methods") response = await routeMethods(sql, acceptsHtml);
       else if (path === "/export.csv" || path === "/export") response = await routeExportCsv(sql, url);
       else if (path === "/openapi" || path === "/openapi.json") response = routeOpenAPI();
       else {
