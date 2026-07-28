@@ -15,6 +15,36 @@ string.
 
 ---
 
+## [0.0.13-neon] — 2026-07-28 (block #10 / SAR-PX-001)
+
+### Added
+- **T5.9 Higham 2014** (PMID 25143113, DOI 10.1038/nature13621) — 40-site AMS radiocarbon Bayesian transect from Russia to Spain. Mousterian ended by **41,030–39,260 cal BP** (95.4%); Neanderthal–AMH temporal overlap **2,600–5,400 years** (95.4%). Ingested as a chronology-framework record — no new specimen row; the paper is registered as a Publication with one framework Analysis attached to existing anchor specimens (feldhofer-1 and mezmaiskaya-1 via site membership in the transect).
+- **T5.10 Krings 1999** (PMID 10318927, DOI 10.1073/pnas.96.10.5581) — completes the HVRII (second hypervariable region) mtDNA sequence on the Feldhofer type specimen begun in Krings 1997 (T5.5). Divergence-date estimate: 465 ka (95% CI 317–741 ka). Adds one Analysis row on `feldhofer-1`. Note: the Notion mission ranked-outcome queue named "Krings 2000"; the only paper matching "Feldhofer complete mtDNA" is this 1999 PNAS paper. Cross-references to Krings 2000 Nat Genet (PMID 11017066, Vindija Vi-77 mtDNA) are noted for a possible T5.11 follow-up ingest.
+- **`/search` HTML facet counts** — search results now render a facets panel with (a) hits by table (publications vs specimens) and (b) publication hits by year with links to `/publications?year=YYYY`. Added `search-facets` to the capability list. New capability count: 21.
+
+### Changed
+- **README reconciled to v0.0.13** — was still declaring v0.0.7 with 24/27/13/24/5 counts.
+- **`mezmaiskaya-1` (Ovchinnikov 2000) analysis row `verification_notes`** — added a chronology cross-reference to Pinhasi 2011 (T5.7) ultrafiltered AMS ~39 ka redate and to Higham 2014 (T5.9) regional Bayesian framework. Row remains `draft`; the mtDNA analysis result stays valid. Direct SQL update against Neon `analyses` id `6204548c-6fad-4805-8aca-0e299d3e6366`.
+- **`CITATION` runtime string** — was still `v0.0.7`; corrected to `v0.0.13`.
+
+### Capability list
+21 capabilities total (was 20): adds `search-facets`. Full list: `pagination`, `fts-search`, `html-browser`, `comparisons`, `provenance-graph`, `license`, `rate-limit`, `access-log`, `stats`, `timeline`, `audit`, `openapi`, `methods`, `related`, `export-csv`, `sitemap-xml`, `year-filter`, `timeline-visual`, `stats-chart`, `random`, `search-facets`.
+
+### Corpus state at end of block #10
+- **32 publications** (was 30)
+- **32 specimens** (unchanged)
+- **16 sites** (unchanged; verified mission baseline was 15, live baseline confirmed 16 at start of block)
+- **34 analyses** (was 33)
+- **37 comparisons** (unchanged)
+
+### Notes
+- All new rows are DRAFT `pending-verification` per standing rules. Only Michael can promote to `source-locked`.
+- `/sites/:id` HTML detail was already implemented in an earlier block; verified live at `/sites/feldhofer-cave` before block #10 work.
+- Every DOI and every verbatim quote in T5.9 and T5.10 was cross-checked against PubMed abstracts (PMID 25143113 and PMID 10318927) on 2026-07-28.
+- Mission-page year discrepancy on "Krings 2000" surfaced as a `Pending human review action` in T5.10 for Michael's review.
+
+---
+
 ## [0.0.12-neon] — 2026-07-27 (block #9)
 
 ### Added
