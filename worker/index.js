@@ -8,9 +8,9 @@
 
 import { neon } from "@neondatabase/serverless";
 
-const VERSION = "0.0.12-neon";
-const BUILD_DATE = "2026-07-27";
-const CITATION = "Specimen Registry v0.0.7 (2026). Maintained by Michael Gonzalez with AI assistance. https://specimenregistry.org. Data licensed under CC BY 4.0.";
+const VERSION = "0.0.13-neon";
+const BUILD_DATE = "2026-07-28";
+const CITATION = "Specimen Registry v0.0.13 (2026). Maintained by Michael Gonzalez with AI assistance. https://specimenregistry.org. Data licensed under CC BY 4.0.";
 const LICENSE_URL = "https://specimenregistry.org/license";
 const SOURCE_URL = "https://github.com/mpgonzalez271/specimen-registry";
 
@@ -1077,7 +1077,11 @@ async function routeSearch(sql, url, wantsHtml) {
 }
 
 async function htmlSearchResults(sql, q, limit, offset) {
-  const [pubHits, specHits] = await Promise.all([
+  // Fire hit lists and facet aggregates in parallel.
+  // Facet aggregates use the same FTS query but return counts only:
+  //   - `by_table`: total hits per table (publications, specimens)
+  //   - `by_year`: hits grouped by publication year (publications only; specimens have no year field)
+  const [pubHits, specHits, pubTotal, specTotal, pubByYear] = await Promise.all([
     sql`
       SELECT id, title, year, journal, ts_rank(fts_tsv, plainto_tsquery('english', ${q})) AS rank
       FROM publications WHERE fts_tsv @@ plainto_tsquery('english', ${q})
@@ -1087,7 +1091,16 @@ async function htmlSearchResults(sql, q, limit, offset) {
              ts_rank(fts_tsv, plainto_tsquery('english', ${q})) AS rank
       FROM specimens WHERE fts_tsv @@ plainto_tsquery('english', ${q})
       ORDER BY rank DESC, id LIMIT ${limit} OFFSET ${offset}`,
+    sql`SELECT COUNT(*)::int AS n FROM publications WHERE fts_tsv @@ plainto_tsquery('english', ${q})`,
+    sql`SELECT COUNT(*)::int AS n FROM specimens WHERE fts_tsv @@ plainto_tsquery('english', ${q})`,
+    sql`
+      SELECT year, COUNT(*)::int AS n
+      FROM publications
+      WHERE fts_tsv @@ plainto_tsquery('english', ${q}) AND year IS NOT NULL
+      GROUP BY year ORDER BY year DESC`,
   ]);
+  const pubTotalN = pubTotal[0]?.n ?? 0;
+  const specTotalN = specTotal[0]?.n ?? 0;
 
   const pubRows = pubHits.map((p) => `
     <tr>
@@ -1104,12 +1117,31 @@ async function htmlSearchResults(sql, q, limit, offset) {
       <td class="rank">${(s.rank ?? 0).toFixed(3)}</td>
     </tr>`).join("");
 
+  const facetYearRows = pubByYear.length
+    ? pubByYear.map((r) => `<li><a href="/publications?year=${r.year}">${r.year}</a> <span class="muted">(${r.n})</span></li>`).join("")
+    : "";
+  const facetsHtml = `
+<div class="facets" style="display:grid;grid-template-columns:1fr 1fr;gap:1rem 2rem;margin:0.5rem 0 1rem;padding:0.5rem 0.75rem;border:1px solid var(--border);border-radius:4px;background:#fafbfc;">
+  <div>
+    <div style="font-size:0.85rem;color:var(--muted);margin-bottom:0.25rem;">Hits by table</div>
+    <ul style="margin:0;padding-left:1.1rem;font-size:0.9rem;">
+      <li>Publications: <strong>${pubTotalN}</strong></li>
+      <li>Specimens: <strong>${specTotalN}</strong></li>
+    </ul>
+  </div>
+  <div>
+    <div style="font-size:0.85rem;color:var(--muted);margin-bottom:0.25rem;">Publication hits by year</div>
+    ${pubByYear.length ? `<ul style="margin:0;padding-left:1.1rem;font-size:0.9rem;column-count:2;">${facetYearRows}</ul>` : `<div class="muted" style="font-size:0.9rem;">No year-tagged matches.</div>`}
+  </div>
+</div>`;
+
   const body = `
 <h1>Search: <em>${escapeHtml(q)}</em></h1>
 <form class="search" action="/search" method="get">
   <input name="q" value="${escapeHtml(q)}" />
   <button type="submit">Search</button>
 </form>
+${facetsHtml}
 
 <h2>Publications (${pubHits.length})</h2>
 ${pubHits.length ? `<table><thead><tr><th>Title</th><th>Year</th><th>Journal</th><th class="rank">rank</th></tr></thead><tbody>${pubRows}</tbody></table>` : `<p class="muted">No matches.</p>`}
@@ -1224,7 +1256,7 @@ export default {
         build_date: BUILD_DATE,
         stage: "pilot-corpus",
         backing_store: "neon-postgres",
-        capabilities: ["pagination", "fts-search", "html-browser", "comparisons", "provenance-graph", "license", "rate-limit", "access-log", "stats", "timeline", "audit", "openapi", "methods", "related", "export-csv", "sitemap-xml", "year-filter", "timeline-visual", "stats-chart", "random"],
+        capabilities: ["pagination", "fts-search", "html-browser", "comparisons", "provenance-graph", "license", "rate-limit", "access-log", "stats", "timeline", "audit", "openapi", "methods", "related", "export-csv", "sitemap-xml", "year-filter", "timeline-visual", "stats-chart", "random", "search-facets"],
       }, { rate_remaining: rate.remaining });
     }
     if (path === "/license") return routeLicense(acceptsHtml);
