@@ -2,7 +2,7 @@
 
 **Live API:** [https://specimenregistry.org](https://specimenregistry.org)
 **Machine-readable spec:** [/openapi](https://specimenregistry.org/openapi)
-**Current version:** `0.0.7-neon`
+**Current version:** `0.0.13-neon`
 **Data license:** [CC BY 4.0](https://specimenregistry.org/license) — attribution required
 
 A public, read-only registry of archaic hominin specimens (Neanderthals,
@@ -25,15 +25,18 @@ notebook, not a peer-reviewed database.
 
 ---
 
-## What's in it (as of 2026-07-26)
+## What's in it (as of 2026-07-28)
 
-- **24** publications (10.1038/, 10.1073/, 10.1126/, 10.1016/, 10.1038/srep DOIs)
-- **27** specimens across **13** sites (Denisova Cave, Vindija, Sima de los
-  Huesos, Baishiya Karst, Chagyrskaya, Goyet, Hohlenstein-Stadel, Les Cottés,
-  Mezmaiskaya, Oase, Scladina, Spy, Kostenki-Markina Gora)
-- **24** analyses linking specimens to methods and papers
-- **5** cross-specimen comparison rows (all `pending-verification`)
-- Full-text search over publication titles/abstracts and specimen fields
+- **32** publications (10.1038/, 10.1073/, 10.1126/, 10.1016/, 10.1038/srep DOIs)
+- **32** specimens across **16** sites (Denisova Cave, Vindija, Sima de los
+  Huesos, Baishiya Karst, Chagyrskaya, El Sidrón, Feldhofer, Goyet,
+  Hohlenstein-Stadel, Les Cottés, Mezmaiskaya, Oase, Scladina, Spy,
+  Kostenki-Markina Gora, Ust'-Ishim)
+- **34** analyses linking specimens to methods and papers
+- **37** cross-specimen comparison rows (mostly `pending-verification`)
+- Verification states: **22 draft, 10 pending-verification, 0 source-locked**
+- Full-text search over publication titles/abstracts and specimen fields, with facet counts by table and by year
+- 21 live capabilities including `/timeline` decade histogram, `/stats` SVG chart, `/random` specimen, `/search` facets
 
 ---
 
